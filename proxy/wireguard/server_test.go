@@ -30,7 +30,9 @@ func TestWireGuardServerInitializationError(t *testing.T) {
 		SecretKey: "", // Empty SecretKey to trigger error
 		Peers: []*wireguard.PeerConfig{
 			{
-				PublicKey:  "some_public_key",
+				// 必须是可解析的公钥,否则会先在配置加载期被拒,
+				// 测不到本用例真正要测的「空 SecretKey」路径。
+				PublicKey:  "0000000000000000000000000000000000000000000000000000000000000000",
 				AllowedIps: []string{"10.0.0.2/32"},
 			},
 		},

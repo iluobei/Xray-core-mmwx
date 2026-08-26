@@ -6,6 +6,8 @@ option go_package = "github.com/xtls/xray-core/proxy/wireguard";
 option java_package = "com.xray.proxy.wireguard";
 option java_multiple_files = true;
 
+import "common/protocol/user.proto";
+
 message PeerConfig {
   string public_key = 1;
   string pre_shared_key = 2;
@@ -31,4 +33,8 @@ message DeviceConfig {
   DomainStrategy domain_strategy = 7;
   bool is_client = 8;
   bool no_kernel_tun = 9;
+
+  // 每个 peer 一个 User,携带 email —— 限速、并发连接数与 per-user 流量统计全靠它。
+  // 上游 345c76f9 用的是 field 5,但本 fork 的 5 已被 num_workers 占用,故改用 10。
+  repeated xray.common.protocol.User users = 10;
 }

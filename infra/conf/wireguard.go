@@ -6,11 +6,17 @@ import (
 	"strings"
 
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/protocol"
+	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/proxy/wireguard"
 	"google.golang.org/protobuf/proto"
 )
 
 type WireGuardPeerConfig struct {
+	// Email 仅服务端(入站)模式有意义:填了才会被建成一个带身份的用户,
+	// 限速、并发连接数与 per-user 流量统计都以它为键。
+	// 留空则退化成匿名 peer —— 能连通,但计不了费、限不了速。
+	Email        string   `json:"email"`
 	PublicKey    string   `json:"publicKey"`
 	PreSharedKey string   `json:"preSharedKey"`
 	Endpoint     string   `json:"endpoint"`
@@ -77,15 +83,35 @@ func (c *WireGuardConfig) Build() (proto.Message, error) {
 		config.Endpoint = c.Address
 	}
 
-	if c.Peers != nil {
-		config.Peers = make([]*wireguard.PeerConfig, len(c.Peers))
-		for i, p := range c.Peers {
-			msg, err := p.Build()
-			if err != nil {
-				return nil, err
-			}
-			config.Peers[i] = msg.(*wireguard.PeerConfig)
+	seenEmail := make(map[string]bool, len(c.Peers))
+	for _, p := range c.Peers {
+		msg, err := p.Build()
+		if err != nil {
+			return nil, err
 		}
+		peer := msg.(*wireguard.PeerConfig)
+
+		// 客户端模式下 peers 是「上游服务器」而不是「用户」,不做用户化处理。
+		if c.IsClient || p.Email == "" {
+			config.Peers = append(config.Peers, peer)
+			continue
+		}
+
+		// allowedIPs 缺省会被填成 0.0.0.0/0 + ::0/0。对匿名 peer 无所谓,
+		// 但对带 email 的用户是致命的:隧道内所有源地址都会命中它,
+		// 整个节点的流量和配额都算到这一个用户头上,且此后再也加不进第二个用户。
+		if len(p.AllowedIPs) == 0 {
+			return nil, errors.New("wireguard peer ", p.Email, ": allowedIPs is required for a peer with email")
+		}
+		if seenEmail[p.Email] {
+			return nil, errors.New("wireguard: duplicated peer email ", p.Email)
+		}
+		seenEmail[p.Email] = true
+
+		config.Users = append(config.Users, &protocol.User{
+			Email:   p.Email,
+			Account: serial.ToTypedMessage(peer),
+		})
 	}
 
 	if c.MTU == 0 {

@@ -3,7 +3,6 @@ package wireguard
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/netip"
 	"strings"
 
@@ -57,37 +56,3 @@ func parseEndpoints(conf *DeviceConfig) ([]netip.Addr, bool, bool, error) {
 }
 
 // serialize the config into an IPC request
-func createIPCRequest(conf *DeviceConfig) string {
-	var request strings.Builder
-
-	request.WriteString(fmt.Sprintf("private_key=%s\n", conf.SecretKey))
-
-	if !conf.IsClient {
-		// placeholder, we'll handle actual port listening on Xray
-		request.WriteString("listen_port=1337\n")
-	}
-
-	for _, peer := range conf.Peers {
-		if peer.PublicKey != "" {
-			request.WriteString(fmt.Sprintf("public_key=%s\n", peer.PublicKey))
-		}
-
-		if peer.PreSharedKey != "" {
-			request.WriteString(fmt.Sprintf("preshared_key=%s\n", peer.PreSharedKey))
-		}
-
-		if peer.Endpoint != "" {
-			request.WriteString(fmt.Sprintf("endpoint=%s\n", peer.Endpoint))
-		}
-
-		for _, ip := range peer.AllowedIps {
-			request.WriteString(fmt.Sprintf("allowed_ip=%s\n", ip))
-		}
-
-		if peer.KeepAlive != 0 {
-			request.WriteString(fmt.Sprintf("persistent_keepalive_interval=%d\n", peer.KeepAlive))
-		}
-	}
-
-	return request.String()[:request.Len()]
-}

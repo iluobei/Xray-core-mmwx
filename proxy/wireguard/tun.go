@@ -37,6 +37,9 @@ type promiscuousModeHandler func(dest net.Destination, conn net.Conn)
 
 type Tunnel interface {
 	BuildDevice(ipc string, bind conn.Bind) error
+	// IpcSet 在设备已运行时增量下发配置(主要是 peer 的增删),
+	// 用于热加/热删用户而不重建整个入站。
+	IpcSet(uapi string) error
 	DialContextTCPAddrPort(ctx context.Context, addr netip.AddrPort) (net.Conn, error)
 	DialUDPAddrPort(laddr, raddr netip.AddrPort) (net.Conn, error)
 	Close() error
@@ -79,6 +82,16 @@ func (t *tunnel) BuildDevice(ipc string, bind conn.Bind) (err error) {
 		return err
 	}
 	return nil
+}
+
+func (t *tunnel) IpcSet(uapi string) error {
+	t.rw.Lock()
+	defer t.rw.Unlock()
+
+	if t.device == nil {
+		return errors.New("device is not initialized")
+	}
+	return t.device.IpcSet(uapi)
 }
 
 func (t *tunnel) Close() (err error) {
