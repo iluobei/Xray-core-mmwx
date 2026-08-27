@@ -31,8 +31,28 @@ type PipeConnWrapper struct {
 	net.Conn
 }
 
+// Close 必须真的把 link 两端拆掉。
+//
+// 原实现返回 nil 什么都不做,于是 sing 的 CopyConn 在一个方向出错时调的
+// common.Close(source) 完全落空 —— 另一个方向仍卡在下面 Read 里那个
+// 硬编码 300s 超时上,inbound worker 的 ctx 也就跟着 300s 不 cancel。
 func (w *PipeConnWrapper) Close() error {
+	common.Interrupt(w.R)
+	common.Close(w.W)
 	return nil
+}
+
+// CloseWrite 上行方向读完(客户端不再发数据)时被 sing 的 CopyConn 调到,
+// 必须把 link.Writer 关掉,出站才知道请求已发完、进而对目标 CloseWrite,
+// 目标关闭连接后下行才拿得到 EOF。
+//
+// 不实现它的后果不是"少个优化":PipeConnWrapper 只嵌了 net.Conn(客户端连接),
+// sing 的 N.CloseWrite 会解包到客户端连接的写端 —— 关的是**反方向**,link 毫发无损。
+// 于是下行 Read 干等满 300s,期间 ctx 不 cancel,依赖 ctx 释放的连接数计数
+// (dispatcher 里的 context.AfterFunc → ReleaseConn)整整滞后 5 分钟:
+// 面板连接数虚高,用户的并发连接上限被已关闭的连接占着,短连接一密集就被误判超限。
+func (w *PipeConnWrapper) CloseWrite() error {
+	return common.Close(w.W)
 }
 
 // This Read implemented a timeout to avoid goroutine leak.
