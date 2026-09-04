@@ -14,6 +14,7 @@ import (
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/log"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/session"
@@ -183,6 +184,31 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 	}
 }
 
+// accessLogCtx 给**这一个会话**挂上访问日志,返回会话内局部 ctx。
+//
+// mieru 是多路复用的:一条底层连接上跑 N 个会话,各有各的目标。所以只能挂在
+// 会话自己的 ctx 上,不能改共享 ctx —— 否则所有会话共用一条 AccessMessage,日志会串。
+//
+// 传进来的 ctx 必须是已经 ContextWithInbound 过的那个(带 Source 与认证用户),
+// 这样 From/Email 直接从 ctx 取,不必把连接对象一路传下来。
+func accessLogCtx(ctx context.Context, dest xnet.Destination) context.Context {
+	inb := session.InboundFromContext(ctx)
+	if inb == nil || !inb.Source.IsValid() {
+		return ctx
+	}
+	email := ""
+	if inb.User != nil {
+		email = inb.User.Email
+	}
+	return log.ContextWithAccessMessage(ctx, &log.AccessMessage{
+		From:   inb.Source,
+		To:     dest,
+		Status: log.AccessAccepted,
+		Reason: "",
+		Email:  email,
+	})
+}
+
 // handleOpen 处理 openSessionRequest:解析 socks5 目标 → dispatch → 回 openSessionResponse + socks5 成功回复
 // → 写初始数据 → 启动 pump。
 func (s *Server) handleOpen(ctx context.Context, base *session.Inbound, user *protocol.MemoryUser, username string,
@@ -207,7 +233,7 @@ func (s *Server) handleOpen(ctx context.Context, base *session.Inbound, user *pr
 	ib.CanSpliceCopy = 3
 	sctx, cancel := context.WithCancel(session.ContextWithInbound(ctx, &ib))
 
-	link, derr := dispatcher.Dispatch(sctx, dest)
+	link, derr := dispatcher.Dispatch(accessLogCtx(sctx, dest), dest)
 	if derr != nil {
 		cancel()
 		return

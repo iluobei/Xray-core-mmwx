@@ -11,6 +11,7 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/log"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
 	udp_proto "github.com/xtls/xray-core/common/protocol/udp"
@@ -254,6 +255,32 @@ func (s *Server) identifyV6Shaped(conn io.Reader) (*protocol.MemoryUser, *Profil
 	return nil, nil, nil, errors.New("snell v6 shaped: no user matched")
 }
 
+// accessLogCtx 给这一条流/这一个数据报挂上访问日志。
+//
+// 移植 snell 时漏了这一步,导致用 snell 的用户在 access.log 里完全不可见 ——
+// 内置协议(vless/trojan/shadowsocks…)都会在 Dispatch 之前把 AccessMessage 放进 ctx,
+// 由分发器统一补上 Detour 后写出。
+//
+// From 取 inbound.Source 而不是 conn.RemoteAddr():两者是同一个地址,而前者已经在 ctx 里,
+// 不必把 conn 一路传到 serveTCP/handleUDP。与 shadowsocks 的写法一致。
+func accessLogCtx(ctx context.Context, dest xnet.Destination) context.Context {
+	inbound := session.InboundFromContext(ctx)
+	if inbound == nil || !inbound.Source.IsValid() {
+		return ctx
+	}
+	email := ""
+	if inbound.User != nil {
+		email = inbound.User.Email
+	}
+	return log.ContextWithAccessMessage(ctx, &log.AccessMessage{
+		From:   inbound.Source,
+		To:     dest,
+		Status: log.AccessAccepted,
+		Reason: "",
+		Email:  email,
+	})
+}
+
 func (s *Server) setInbound(ctx context.Context, user *protocol.MemoryUser) {
 	inbound := session.InboundFromContext(ctx)
 	inbound.Name = "snell"
@@ -275,6 +302,7 @@ func (s *Server) serve(ctx context.Context, req request, reader snellReader, wri
 }
 
 func (s *Server) serveTCP(ctx context.Context, destination xnet.Destination, reader snellReader, writer snellWriter, dispatcher routing.Dispatcher, sessPolicy policy.Session) error {
+	ctx = accessLogCtx(ctx, destination)
 	link, err := dispatcher.Dispatch(ctx, destination)
 	if err != nil {
 		return errors.New("snell: dispatch").Base(err)
@@ -366,6 +394,7 @@ func (s *Server) handleUDP(ctx context.Context, reader snellReader, writer snell
 			b.Release()
 			return err
 		}
-		udpServer.Dispatch(ctx, dest, b)
+		// 逐包挂日志:UDP 一条隧道会打到很多目标,不能共用一条 AccessMessage。
+		udpServer.Dispatch(accessLogCtx(ctx, dest), dest, b)
 	}
 }

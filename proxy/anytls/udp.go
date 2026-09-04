@@ -51,7 +51,9 @@ func (s *session) handleUDPStream(ctx context.Context, st *stream) {
 	}
 	firstDest := singbridge.ToDestination(request.Destination, net.Network_UDP)
 
-	link, err := s.dispatcher.Dispatch(ctx, firstDest)
+	// uot full-cone 只在这里 Dispatch 一次,之后逐包目标写进同一条 link ——
+	// 所以访问日志只记得到首个目标。UDP 目标多为 IP 字面量,影响有限。
+	link, err := s.dispatcher.Dispatch(accessLogCtx(ctx, firstDest), firstDest)
 	if err != nil {
 		errors.LogWarning(ctx, "anytls: UDP dispatcher error, streamId=", st.sid, " err=", err)
 		s.finishStream(st.sid, nil)

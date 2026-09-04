@@ -217,7 +217,8 @@ func (us *udpServerSession) handleOpen(seg *segment) bool {
 	ib.User = us.user
 	ib.Name = "mieru"
 	ib.CanSpliceCopy = 3
-	link, derr := us.dispatcher.Dispatch(session.ContextWithInbound(us.ctx, &ib), dest)
+	sctx := session.ContextWithInbound(us.ctx, &ib)
+	link, derr := us.dispatcher.Dispatch(accessLogCtx(sctx, dest), dest)
 	if derr != nil {
 		return false
 	}

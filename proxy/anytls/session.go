@@ -16,7 +16,9 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
+	xlog "github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
+	sessionctx "github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/singbridge"
 	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/transport"
@@ -81,6 +83,32 @@ func (s *session) handlePSH(ctx context.Context, st *stream, br *buf.BufferedRea
 	return nil
 }
 
+// accessLogCtx 给**这一条流**挂上访问日志,返回流内局部 ctx。
+//
+// anytls 是多路复用的:一条 TLS 连接上跑 N 条逻辑流,各有各的目标。所以绝不能改
+// session 级的 ctx —— 那样所有流会共用同一条 AccessMessage,日志全串。
+// 调用方必须把返回值当**局部变量**用,只传给这条流的 Dispatch。
+//
+// From 取 inbound.Source(与 shadowsocks 一致):它已经在 ctx 里,不必把 conn 传下来。
+// 包名 session 被本包的 session 类型占了,所以用 sessionctx 别名(与 inbound.go 一致)。
+func accessLogCtx(ctx context.Context, dest net.Destination) context.Context {
+	inb := sessionctx.InboundFromContext(ctx)
+	if inb == nil || !inb.Source.IsValid() {
+		return ctx
+	}
+	email := ""
+	if inb.User != nil {
+		email = inb.User.Email
+	}
+	return xlog.ContextWithAccessMessage(ctx, &xlog.AccessMessage{
+		From:   inb.Source,
+		To:     dest,
+		Status: xlog.AccessAccepted,
+		Reason: "",
+		Email:  email,
+	})
+}
+
 func (s *session) handleNewStream(ctx context.Context, st *stream, br *buf.BufferedReader) error {
 	addr, err := M.SocksaddrSerializer.ReadAddrPort(br)
 	if err != nil {
@@ -111,7 +139,7 @@ func (s *session) handleNewStream(ctx context.Context, st *stream, br *buf.Buffe
 		return nil
 	}
 
-	l, err := s.dispatcher.Dispatch(ctx, dest)
+	l, err := s.dispatcher.Dispatch(accessLogCtx(ctx, dest), dest)
 	if err != nil {
 		errors.LogWarning(ctx, "anytls: new stream dispatcher error, streamId=", st.sid, " err=", err)
 		return nil
@@ -138,7 +166,7 @@ func (s *session) handleFirstUDPFrame(ctx context.Context, st *stream, br *buf.B
 		}
 		requestDest := singbridge.ToDestination(request.Destination, net.Network_UDP)
 
-		link, err := s.dispatcher.Dispatch(ctx, requestDest)
+		link, err := s.dispatcher.Dispatch(accessLogCtx(ctx, requestDest), requestDest)
 		if err != nil {
 			errors.LogWarning(ctx, "anytls: UDP dispatcher error, streamId=", st.sid, " err=", err)
 			_ = s.sendFrame(newFrame(cmdFIN, st.sid))
