@@ -501,6 +501,9 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 
 	ob.Tag = handler.Tag()
 	if accessMessage := log.AccessMessageFromContext(ctx); accessMessage != nil {
+		// 入站 tag 记进消息里,给 app/log 做排除判断(默认不记 api 入站的访问日志)。
+		// 填在这里是因为这是访问日志唯一的汇合点:协议无关,一处覆盖全部入站。
+		accessMessage.Tag = inTag
 		if tag := handler.Tag(); tag != "" {
 			if inTag == "" {
 				accessMessage.Detour = tag

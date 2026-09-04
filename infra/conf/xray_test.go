@@ -87,6 +87,8 @@ func TestXrayConfig(t *testing.T) {
 						ErrorLogLevel: clog.Severity_Error,
 						AccessLogType: log.LogType_File,
 						AccessLogPath: "/var/log/xray/access.log",
+						// 配置里没写 accessExcludeInboundTags → 用默认清单(不记 api 入站的访问日志)
+						AccessExcludeInboundTags: []string{"api"},
 					}),
 					serial.ToTypedMessage(&dispatcher.Config{}),
 					serial.ToTypedMessage(&proxyman.InboundConfig{}),

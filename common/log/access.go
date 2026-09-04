@@ -27,6 +27,10 @@ type AccessMessage struct {
 	Reason interface{}
 	Email  string
 	Detour string
+	// Tag 这条访问来自哪个入站。**刻意不进 String()** —— 日志行格式一个字都不变,
+	// 它只给 app/log 那层做「哪些入站不记访问日志」的过滤用。
+	// 由 app/dispatcher 在 Record 之前统一填(那是访问日志唯一的汇合点,与协议无关)。
+	Tag string
 }
 
 func (m *AccessMessage) String() string {

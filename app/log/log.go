@@ -23,6 +23,12 @@ type Instance struct {
 	dns          bool
 	mask4        int
 	mask6        int
+	// accessExcludeTags 这些入站的访问日志不写。
+	//
+	// 为什么需要:api 是个 dokodemo-door 入站,管理端每轮询一次统计就产生一行
+	// "[api -> api]" 访问日志,而访问日志**不受 loglevel 约束**(那只 gate 错误日志),
+	// 于是这些纯噪音一直在占磁盘。按入站 tag 在这里过滤是协议无关的一处收口。
+	accessExcludeTags map[string]bool
 }
 
 // New creates a new log.Instance based on the given config.
@@ -32,12 +38,19 @@ func New(ctx context.Context, config *Config) (*Instance, error) {
 		return nil, err
 	}
 
+	excluded := make(map[string]bool, len(config.AccessExcludeInboundTags))
+	for _, tag := range config.AccessExcludeInboundTags {
+		if tag != "" {
+			excluded[tag] = true
+		}
+	}
 	g := &Instance{
-		config: config,
-		active: false,
-		dns:    config.EnableDnsLog,
-		mask4:  m4,
-		mask6:  m6,
+		config:            config,
+		active:            false,
+		dns:               config.EnableDnsLog,
+		mask4:             m4,
+		mask6:             m6,
+		accessExcludeTags: excluded,
 	}
 	log.RegisterHandler(g)
 
@@ -125,6 +138,9 @@ func (g *Instance) Handle(msg log.Message) {
 
 	switch msg := msg.(type) {
 	case *log.AccessMessage:
+		if len(g.accessExcludeTags) > 0 && g.accessExcludeTags[msg.Tag] {
+			return // 该入站的访问日志被显式排除(默认含 api)
+		}
 		if g.accessLogger != nil {
 			g.accessLogger.Handle(Msg)
 		}
