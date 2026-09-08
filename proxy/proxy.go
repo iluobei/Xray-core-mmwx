@@ -720,6 +720,13 @@ func UnwrapRawConn(conn net.Conn) (net.Conn, stats.Counter, stats.Counter) {
 // CopyRawConnIfExist use the most efficient copy method.
 // - If caller don't want to turn on splice, do not pass in both reader conn and writer conn
 // - writer are from *transport.Link
+// spliceAccountChunk 是 splice 路径下两次记账之间最多搬运的字节数。
+//
+// 它直接决定「流量额度最坏能被突破多少」:单条连接最多 spliceAccountChunk 未入账,
+// 一个用户 N 条并发连接就是 N × spliceAccountChunk。取 8MiB —— 千兆下约 60ms 记一次账,
+// 就算 50 条并发也只有 400MB 的账目滞后,相比周期性超额检查本身的窗口可以忽略。
+const spliceAccountChunk = 8 << 20
+
 func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net.Conn, writer buf.Writer, timer *signal.ActivityTimer, inTimer *signal.ActivityTimer) error {
 	readerConn, readCounter, _ := UnwrapRawConn(readerConn)
 	writerConn, _, writeCounter := UnwrapRawConn(writerConn)
@@ -762,15 +769,36 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 			if inTimer != nil {
 				inTimer.SetTimeout(24 * time.Hour)
 			}
-			w, err := tc.ReadFrom(readerConn)
-			if readCounter != nil {
-				readCounter.Add(w) // outbound stats
-			}
-			if writeCounter != nil {
-				writeCounter.Add(w) // inbound stats
-			}
-			if statWriter != nil {
-				statWriter.Counter.Add(w) // user stats
+			// 分段搬运,每段结束就记账。
+			//
+			// 从前这里是一句 tc.ReadFrom(readerConn):它一路 splice 到 EOF 才返回,
+			// 期间搬掉的字节对统计系统**完全不可见**,连接结束才一次性入账。
+			// 于是一条长连接(大文件下载 / 视频 / BT)可以跑掉几十 GB 而流量额度那侧
+			// 一动不动,超额判定要等这条连接断了才看得见 —— 用户实报「超了几十个 G
+			// 才被移除访问权限」。同类问题见 0404f82b(SS2022 关闭后计数滞后 300 秒)。
+			//
+			// io.CopyN 会用 *io.LimitedReader 包住 readerConn,而 Go 的 splice 实现
+			// (net/splice_linux.go)正好认这个类型:解包出底层 conn 并把 N 当 remain。
+			// 所以仍然是内核零拷贝,只是多了几次外层循环迭代 —— splice syscall 本身
+			// 受 pipe 缓冲区限制,内部本来就在循环,这层开销可忽略。
+			var err error
+			for {
+				var n int64
+				n, err = io.CopyN(tc, readerConn, spliceAccountChunk)
+				if n > 0 {
+					if readCounter != nil {
+						readCounter.Add(n) // outbound stats
+					}
+					if writeCounter != nil {
+						writeCounter.Add(n) // inbound stats
+					}
+					if statWriter != nil {
+						statWriter.Counter.Add(n) // user stats
+					}
+				}
+				if err != nil {
+					break
+				}
 			}
 			if err != nil && errors.Cause(err) != io.EOF {
 				return err
