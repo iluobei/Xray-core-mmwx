@@ -134,6 +134,9 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 
 	var mu sync.Mutex
 	sessions := make(map[uint32]*serverSession)
+	// pending:已经收到 openSessionRequest、但 socks5 请求字节还没到齐的会话。
+	// HANDSHAKE_NO_WAIT 的客户端手上没有应用数据时就是这样开会话的(#673)。
+	pending := make(map[uint32]*pendingOpen)
 	closeAll := func() {
 		mu.Lock()
 		for _, ss := range sessions {
@@ -151,20 +154,49 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 		}
 		switch seg.protocolType {
 		case protoOpenSessionRequest:
-			s.handleOpen(connCtx, base, user, username, seg, dispatcher, writer, &mu, sessions)
+			opened, needMore := s.handleOpen(connCtx, base, user, username,
+				seg.sessionID, seg.seq, seg.payload, dispatcher, writer, &mu, sessions)
+			if !opened && needMore {
+				// socks5 请求还没到齐(NO_WAIT 客户端的空 openSessionRequest 就是
+				// 这种)。留着攒后续 data 段,别像以前那样静默丢掉整条会话。
+				pending[seg.sessionID] = &pendingOpen{
+					seq: seg.seq,
+					buf: append([]byte(nil), seg.payload...),
+				}
+			}
 		case protoDataClientToServer:
 			mu.Lock()
 			ss := sessions[seg.sessionID]
 			mu.Unlock()
 			if ss != nil {
 				// 先推进累积确认水位,再喂数据:后面任何一个出站段都会把它捎带回去。
-				// 不捎带的话客户端流控永远不滑动,窗口填满即僵死(#673)。
+				// 不捎带的话客户端流控永远不滑动,窗口填满即僵死。
 				ss.noteClientSeq(seg.seq)
 				if ferr := ss.feed(seg.payload); ferr != nil {
 					ss.interrupt()
 				}
+				break
+			}
+			// 还没建起来的会话:继续攒 socks5 请求
+			po := pending[seg.sessionID]
+			if po == nil {
+				break // 既不是已知会话也不是待定会话 → 忽略(原行为)
+			}
+			po.seq = seg.seq
+			po.buf = append(po.buf, seg.payload...)
+			if len(po.buf) > maxPendingSocks5Bytes {
+				// 攒到这个量还没解出 socks5,基本可以断定不是我们认识的东西。
+				// 不设上限的话,一条乱发数据的连接能把内存吃干。
+				delete(pending, seg.sessionID)
+				break
+			}
+			opened, needMore := s.handleOpen(connCtx, base, user, username,
+				seg.sessionID, po.seq, po.buf, dispatcher, writer, &mu, sessions)
+			if opened || !needMore {
+				delete(pending, seg.sessionID)
 			}
 		case protoCloseSessionRequest:
+			delete(pending, seg.sessionID)
 			mu.Lock()
 			ss := sessions[seg.sessionID]
 			delete(sessions, seg.sessionID)
@@ -174,6 +206,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 				ss.interrupt()
 			}
 		case protoCloseSessionResponse:
+			delete(pending, seg.sessionID)
 			mu.Lock()
 			ss := sessions[seg.sessionID]
 			delete(sessions, seg.sessionID)
@@ -212,18 +245,36 @@ func accessLogCtx(ctx context.Context, dest xnet.Destination) context.Context {
 	})
 }
 
-// handleOpen 处理 openSessionRequest:解析 socks5 目标 → dispatch → 回 openSessionResponse + socks5 成功回复
-// → 写初始数据 → 启动 pump。
-func (s *Server) handleOpen(ctx context.Context, base *session.Inbound, user *protocol.MemoryUser, username string,
-	seg *segment, dispatcher routing.Dispatcher, writer *lockedWriter, mu *sync.Mutex, sessions map[uint32]*serverSession) {
+// pendingOpen 是一条「已开会话、socks5 请求还没到齐」的暂存:攒字节 + 记最新 seq。
+type pendingOpen struct {
+	seq uint32
+	buf []byte
+}
 
-	dest, cmd, consumed, perr := parseSocks5Request(seg.payload)
+// maxPendingSocks5Bytes 是攒 socks5 请求的上限。socks5 CONNECT 头最长也就 262 字节,
+// 给足余量即可 —— 上限的意义是防止乱发数据的连接把内存吃干。
+const maxPendingSocks5Bytes = 8 * 1024
+
+// handleOpen 用累积到的 payload 尝试开一个会话:解析 socks5 目标 → dispatch →
+// 回 openSessionResponse + socks5 成功回复 → 写初始数据 → 启动 pump。
+//
+// payload 不一定来自 openSessionRequest 本身 —— HANDSHAKE_NO_WAIT 的客户端在还
+// 没有应用数据时,会先发一个空 payload 的 openSessionRequest,把 socks5 请求放进
+// 随后的第一个 data 段(#673)。所以这里接受调用方攒起来的字节,并用返回值告诉
+// 调用方「还差字节,继续攒」还是「这不是 socks5,别攒了」。
+//
+// 返回 needMore=true 表示字节还没到齐;opened=true 表示会话已建立。
+func (s *Server) handleOpen(ctx context.Context, base *session.Inbound, user *protocol.MemoryUser, username string,
+	sessionID, clientSeq uint32, payload []byte, dispatcher routing.Dispatcher, writer *lockedWriter,
+	mu *sync.Mutex, sessions map[uint32]*serverSession) (opened bool, needMore bool) {
+
+	dest, cmd, consumed, perr := parseSocks5Request(payload)
 	if perr != nil {
-		return
+		return false, perr == errSocks5Incomplete
 	}
 	if cmd != socks5CmdConnect {
 		// UDP-associate 等后续支持;此处仅优雅忽略(不建会话)。
-		return
+		return false, false
 	}
 
 	// 每会话独立 Inbound(带认证用户),供 dispatcher 归属统计/限速/限连接数。
@@ -239,34 +290,35 @@ func (s *Server) handleOpen(ctx context.Context, base *session.Inbound, user *pr
 	link, derr := dispatcher.Dispatch(accessLogCtx(sctx, dest), dest)
 	if derr != nil {
 		cancel()
-		return
+		return false, false
 	}
 
-	ss := &serverSession{id: seg.sessionID, link: link, writer: writer, cancel: cancel}
-	// openSessionRequest 本身也占一个客户端 seq,要先确认掉 —— 紧接着发出的
-	// socks5 成功回复是本会话第一个出站段,它捎带的水位必须已经包含这一段。
-	ss.noteClientSeq(seg.seq)
+	ss := &serverSession{id: sessionID, link: link, writer: writer, cancel: cancel}
+	// 已经收到的客户端段都要确认掉 —— 紧接着发出的 socks5 成功回复是本会话第一个
+	// 出站段,它捎带的水位必须已经包含这些。
+	ss.noteClientSeq(clientSeq)
 	mu.Lock()
-	sessions[seg.sessionID] = ss
+	sessions[sessionID] = ss
 	mu.Unlock()
 
 	// openSessionResponse(seq 0)+ socks5 成功回复(首个 data 段,seq 1)
 	if err := ss.writeControl(protoOpenSessionResponse); err != nil {
 		ss.interrupt()
-		return
+		return false, false
 	}
 	if err := ss.writeData(socks5SuccessReplyIPv4); err != nil {
 		ss.interrupt()
-		return
+		return false, false
 	}
-	// openSessionRequest 里 socks5 请求之后紧跟的初始应用数据 → 写给落地
-	if consumed < len(seg.payload) {
-		if err := ss.feed(seg.payload[consumed:]); err != nil {
+	// socks5 请求之后紧跟的初始应用数据 → 写给落地
+	if consumed < len(payload) {
+		if err := ss.feed(payload[consumed:]); err != nil {
 			ss.interrupt()
-			return
+			return false, false
 		}
 	}
 	go ss.pump()
+	return true, false
 }
 
 func init() {
