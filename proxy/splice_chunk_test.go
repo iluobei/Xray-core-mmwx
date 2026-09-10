@@ -16,17 +16,9 @@ func TestSpliceChunkedAccounting(t *testing.T) {
 	dstR, dstW := net.Pipe()
 
 	var counted atomic.Int64
-	// 模拟 CopyRawConnIfExist 里的分段循环
+	// 跑的就是 CopyRawConnIfExist 用的那份分段循环
 	go func() {
-		for {
-			n, err := io.CopyN(dstW, srv, spliceAccountChunk)
-			if n > 0 {
-				counted.Add(n)
-			}
-			if err != nil {
-				return
-			}
-		}
+		_ = spliceCopyAccounted(dstW, srv, func(n int64) { counted.Add(n) })
 	}()
 	// 排空目的端
 	go func() { io.Copy(io.Discard, dstR) }()

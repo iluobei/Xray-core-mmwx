@@ -720,12 +720,78 @@ func UnwrapRawConn(conn net.Conn) (net.Conn, stats.Counter, stats.Counter) {
 // CopyRawConnIfExist use the most efficient copy method.
 // - If caller don't want to turn on splice, do not pass in both reader conn and writer conn
 // - writer are from *transport.Link
-// spliceAccountChunk 是 splice 路径下两次记账之间最多搬运的字节数。
+// spliceAccountChunk 是 splice 路径下两次记账之间**最多**搬运的字节数(段大小上限)。
 //
 // 它直接决定「流量额度最坏能被突破多少」:单条连接最多 spliceAccountChunk 未入账,
 // 一个用户 N 条并发连接就是 N × spliceAccountChunk。取 8MiB —— 千兆下约 60ms 记一次账,
 // 就算 50 条并发也只有 400MB 的账目滞后,相比周期性超额检查本身的窗口可以忽略。
-const spliceAccountChunk = 8 << 20
+//
+// 但它只是**上限**,不是固定段大小。固定 8MiB 对低速连接是灾难:一条 300KB/s 的连接
+// 要 27 秒才记一次账,期间计数器纹丝不动,然后一次涨 8MiB —— agent 每 3 秒采样一次算
+// 速度,看到的就是「0、0、0、0、0、0、0、0、5.8MB/s」,面板上显示成远超服务器带宽的数字
+// (用户实报「网速超出带宽十几倍」)。限速用户没这个问题,因为限速器走用户态、逐包记账,
+// 于是同一台机器上「有的用户准、有的离谱」。
+//
+// 所以段大小按上一段的实测速率自适应,目标是每段耗时 spliceAccountTarget:
+// 快连接很快撞到 8MiB 上限(行为与从前一致),慢连接自动缩小到几百 KB,记账间隔
+// 稳定在半秒左右,与速度无关。代价是慢连接多几次外层循环 —— splice 的 syscall
+// 本来就按 pipe 缓冲区分批,外层多转几圈可以忽略;真正的开销 counter.Add 是原子加。
+const (
+	spliceAccountChunk     = 8 << 20                // 段大小上限,也是计费滞后上限
+	spliceAccountChunkMin  = 64 << 10               // 段大小下限:再小外层循环开销开始显形
+	spliceAccountChunkInit = 256 << 10              // 首段:还不知道速率,取个中间值起步
+	spliceAccountTarget    = 500 * time.Millisecond // 每段的目标耗时
+)
+
+// nextSpliceChunk 用上一段的实测(搬了 n 字节、花了 took)调整下一段大小,
+// 目标是每段耗时逼近 spliceAccountTarget。信息不足则沿用当前值。
+//
+// 这是个**比例控制器**,不是一步到位的换算 —— 单步变化夹在 ×2/÷2 之间。
+// 这一夹是关键:splice 的内核缓冲区(pipe + socket,可达数 MiB)在连接刚满速或
+// 客户端限速节流的间隙,会让某一段瞬间测出极高速率。若照它一步算,段长会直接顶到
+// 8MiB 上限,而下一段 io.CopyN(8MiB) 在真实低速率下要阻塞几十秒才返回 —— 记账又回到
+// 「长期为 0、偶尔一大坨」,正是要治的病。夹住之后,一次瞬时尖峰最多让段翻倍,
+// 几段之内就自我校正回稳态,记账间隔始终维持在半秒量级。
+func nextSpliceChunk(cur, n int64, took time.Duration) int64 {
+	if n <= 0 || took <= 0 {
+		return cur
+	}
+	want := int64(float64(cur) * float64(spliceAccountTarget) / float64(took))
+	if want > cur*2 {
+		want = cur * 2
+	}
+	if want < cur/2 {
+		want = cur / 2
+	}
+	if want > spliceAccountChunk {
+		want = spliceAccountChunk
+	}
+	if want < spliceAccountChunkMin {
+		want = spliceAccountChunkMin
+	}
+	return want
+}
+
+// spliceCopyAccounted 分段把 src 搬到 dst,每段结束调一次 account(n) 记账,
+// 段大小按实测速率自适应(见 nextSpliceChunk)。正常结束返回 io.EOF。
+//
+// dst 是 *net.TCPConn、src 也是 TCP 时,io.CopyN 用 *io.LimitedReader 包住 src,
+// Go 的 splice 实现(net/splice_linux.go)正好认这个类型:解包底层 conn、把 N 当 remain,
+// 所以仍然是内核零拷贝。抽成独立函数是为了让测试跑的就是生产这一份循环。
+func spliceCopyAccounted(dst io.Writer, src io.Reader, account func(int64)) error {
+	chunk := int64(spliceAccountChunkInit)
+	for {
+		start := time.Now()
+		n, err := io.CopyN(dst, src, chunk)
+		if n > 0 {
+			account(n)
+		}
+		if err != nil {
+			return err
+		}
+		chunk = nextSpliceChunk(chunk, n, time.Since(start))
+	}
+}
 
 func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net.Conn, writer buf.Writer, timer *signal.ActivityTimer, inTimer *signal.ActivityTimer) error {
 	readerConn, readCounter, _ := UnwrapRawConn(readerConn)
@@ -769,37 +835,24 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 			if inTimer != nil {
 				inTimer.SetTimeout(24 * time.Hour)
 			}
-			// 分段搬运,每段结束就记账。
+			// 分段搬运,每段结束就记账(段大小自适应,见 spliceCopyAccounted)。
 			//
 			// 从前这里是一句 tc.ReadFrom(readerConn):它一路 splice 到 EOF 才返回,
 			// 期间搬掉的字节对统计系统**完全不可见**,连接结束才一次性入账。
 			// 于是一条长连接(大文件下载 / 视频 / BT)可以跑掉几十 GB 而流量额度那侧
 			// 一动不动,超额判定要等这条连接断了才看得见 —— 用户实报「超了几十个 G
 			// 才被移除访问权限」。同类问题见 0404f82b(SS2022 关闭后计数滞后 300 秒)。
-			//
-			// io.CopyN 会用 *io.LimitedReader 包住 readerConn,而 Go 的 splice 实现
-			// (net/splice_linux.go)正好认这个类型:解包出底层 conn 并把 N 当 remain。
-			// 所以仍然是内核零拷贝,只是多了几次外层循环迭代 —— splice syscall 本身
-			// 受 pipe 缓冲区限制,内部本来就在循环,这层开销可忽略。
-			var err error
-			for {
-				var n int64
-				n, err = io.CopyN(tc, readerConn, spliceAccountChunk)
-				if n > 0 {
-					if readCounter != nil {
-						readCounter.Add(n) // outbound stats
-					}
-					if writeCounter != nil {
-						writeCounter.Add(n) // inbound stats
-					}
-					if statWriter != nil {
-						statWriter.Counter.Add(n) // user stats
-					}
+			err := spliceCopyAccounted(tc, readerConn, func(n int64) {
+				if readCounter != nil {
+					readCounter.Add(n) // outbound stats
 				}
-				if err != nil {
-					break
+				if writeCounter != nil {
+					writeCounter.Add(n) // inbound stats
 				}
-			}
+				if statWriter != nil {
+					statWriter.Counter.Add(n) // user stats
+				}
+			})
 			if err != nil && errors.Cause(err) != io.EOF {
 				return err
 			}
