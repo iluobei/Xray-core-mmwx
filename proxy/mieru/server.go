@@ -157,6 +157,9 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 			ss := sessions[seg.sessionID]
 			mu.Unlock()
 			if ss != nil {
+				// 先推进累积确认水位,再喂数据:后面任何一个出站段都会把它捎带回去。
+				// 不捎带的话客户端流控永远不滑动,窗口填满即僵死(#673)。
+				ss.noteClientSeq(seg.seq)
 				if ferr := ss.feed(seg.payload); ferr != nil {
 					ss.interrupt()
 				}
@@ -240,6 +243,9 @@ func (s *Server) handleOpen(ctx context.Context, base *session.Inbound, user *pr
 	}
 
 	ss := &serverSession{id: seg.sessionID, link: link, writer: writer, cancel: cancel}
+	// openSessionRequest 本身也占一个客户端 seq,要先确认掉 —— 紧接着发出的
+	// socks5 成功回复是本会话第一个出站段,它捎带的水位必须已经包含这一段。
+	ss.noteClientSeq(seg.seq)
 	mu.Lock()
 	sessions[seg.sessionID] = ss
 	mu.Unlock()
