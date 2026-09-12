@@ -1,6 +1,7 @@
 package anytls
 
 import (
+	"context"
 	"io"
 	"sync"
 
@@ -12,6 +13,12 @@ import (
 type stream struct {
 	sid  uint32
 	link *transport.Link
+
+	// cancel 取消本条流专属的 dispatch ctx。dispatcher 在 Dispatch 时对该 ctx 注册了
+	// online-IP 的 RemoveIP(AfterFunc),所以流结束时必须调它,否则在线 IP 直到整个
+	// anytls 会话(可能被客户端连接池长期保活)关闭才清 —— 表现为「断连后面板仍记录连接」(#731)。
+	// context.CancelFunc 幂等,可从 close()/pumpDownlink 多处安全调用。
+	cancel context.CancelFunc
 
 	done     chan struct{}
 	doneOnce sync.Once
@@ -40,6 +47,10 @@ func newStream(sid uint32, link *transport.Link) *stream {
 }
 
 func (st *stream) close(err error) {
+	// 流结束即取消其 dispatch ctx → 触发 dispatcher 注册的 RemoveIP,让在线 IP 按活跃流实时清理(#731)。
+	if st.cancel != nil {
+		st.cancel()
+	}
 	// 关闭 uplink pipe 两端:让 handleUDPStream 的读循环拿到 EOF/ErrClosedPipe 退出,
 	// 并解阻塞可能卡在 feedUDPUplink 写入的 readLoop。io.Pipe 的 Close 幂等,可重复调用。
 	if st.uplinkW != nil {

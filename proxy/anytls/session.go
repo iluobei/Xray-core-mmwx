@@ -139,11 +139,16 @@ func (s *session) handleNewStream(ctx context.Context, st *stream, br *buf.Buffe
 		return nil
 	}
 
-	l, err := s.dispatcher.Dispatch(accessLogCtx(ctx, dest), dest)
+	// 每条流用独立可取消 ctx 去 Dispatch:dispatcher 会对该 ctx 注册 online-IP 的 RemoveIP,
+	// 流结束时取消它即实时清理在线 IP,而不必等整个 anytls 会话(可能被连接池长期保活)关闭(#731)。
+	sctx, cancel := context.WithCancel(ctx)
+	l, err := s.dispatcher.Dispatch(accessLogCtx(sctx, dest), dest)
 	if err != nil {
+		cancel()
 		errors.LogWarning(ctx, "anytls: new stream dispatcher error, streamId=", st.sid, " err=", err)
 		return nil
 	}
+	st.cancel = cancel
 	st.link = l
 
 	if err := s.sendFrame(newFrame(cmdSYNACK, st.sid)); err != nil {
@@ -166,14 +171,17 @@ func (s *session) handleFirstUDPFrame(ctx context.Context, st *stream, br *buf.B
 		}
 		requestDest := singbridge.ToDestination(request.Destination, net.Network_UDP)
 
-		link, err := s.dispatcher.Dispatch(accessLogCtx(ctx, requestDest), requestDest)
+		sctx, cancel := context.WithCancel(ctx)
+		link, err := s.dispatcher.Dispatch(accessLogCtx(sctx, requestDest), requestDest)
 		if err != nil {
+			cancel()
 			errors.LogWarning(ctx, "anytls: UDP dispatcher error, streamId=", st.sid, " err=", err)
 			_ = s.sendFrame(newFrame(cmdFIN, st.sid))
 			s.finishStream(st.sid, nil)
 			return nil
 		}
 
+		st.cancel = cancel
 		st.link = link
 		st.udpTarget = &requestDest
 
@@ -190,9 +198,15 @@ func (s *session) pumpDownlink(sid uint32, link *transport.Link) {
 		st := s.streams[sid]
 		delete(s.streams, sid)
 		s.streamsMu.Unlock()
-		if st != nil && st.link != nil {
-			common.Close(st.link.Writer)
-			common.Close(st.link.Reader)
+		if st != nil {
+			// 下行泵结束=该流关闭,取消其 dispatch ctx 触发 RemoveIP(#731)。
+			if st.cancel != nil {
+				st.cancel()
+			}
+			if st.link != nil {
+				common.Close(st.link.Writer)
+				common.Close(st.link.Reader)
+			}
 		}
 		if !s.isClosed() {
 			_ = s.sendFrame(newFrame(cmdFIN, sid))

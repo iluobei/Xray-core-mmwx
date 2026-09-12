@@ -53,12 +53,15 @@ func (s *session) handleUDPStream(ctx context.Context, st *stream) {
 
 	// uot full-cone 只在这里 Dispatch 一次,之后逐包目标写进同一条 link ——
 	// 所以访问日志只记得到首个目标。UDP 目标多为 IP 字面量,影响有限。
-	link, err := s.dispatcher.Dispatch(accessLogCtx(ctx, firstDest), firstDest)
+	sctx, cancel := context.WithCancel(ctx)
+	link, err := s.dispatcher.Dispatch(accessLogCtx(sctx, firstDest), firstDest)
 	if err != nil {
+		cancel()
 		errors.LogWarning(ctx, "anytls: UDP dispatcher error, streamId=", st.sid, " err=", err)
 		s.finishStream(st.sid, nil)
 		return
 	}
+	st.cancel = cancel
 	st.link = link
 	st.uotConnected = request.IsConnect
 	st.uotDest = firstDest
