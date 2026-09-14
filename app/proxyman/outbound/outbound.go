@@ -137,6 +137,15 @@ func (m *Manager) RemoveHandler(ctx context.Context, tag string) error {
 
 	m.tagsCache = &sync.Map{}
 
+	// 移除时必须 Close:只从 map 里删掉,handler 持有的资源不会释放。
+	// WireGuard 出站自带 gvisor 协议栈 + UDP bind —— 不 Close 的话面板上把出站删了、
+	// xray 也重载了,端口却仍被占用,只有整个进程重启才放开(用户实报)。
+	// 入站 manager 一直是 Close 的(app/proxyman/inbound/inbound.go:82),这边漏了。
+	if h, ok := m.taggedHandler[tag]; ok && h != nil {
+		if err := common.Close(h); err != nil {
+			errors.LogInfoInner(ctx, err, "failed to close outbound handler ", tag)
+		}
+	}
 	delete(m.taggedHandler, tag)
 	if m.defaultHandler != nil && m.defaultHandler.Tag() == tag {
 		m.defaultHandler = nil
