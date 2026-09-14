@@ -129,6 +129,18 @@ message SocketConfig {
 
   bool accept_proxy_protocol = 7;
 
+  // trust_loopback_proxy_protocol 宽容模式:**只信任来自本机的** PROXY 头,
+  // 且不带头的连接照常放行。
+  //
+  // accept_proxy_protocol 用的是 REQUIRE —— 不带 PROXY 头的连接一律拒。放在
+  // CDN/nginx 后面时这是对的(顺带挡掉直连),但「偷自己 tunnel 模式」不是那个场景:
+  // 那里 443 上的 dokodemo 把流量转到本机内部端口,内部端口同时还可能被
+  // 老订阅直连。用 REQUIRE 会把这些老客户端全部打断。
+  //
+  // 宽容模式下:本机来的连接有头就用(拿回真实客户端 IP)、没头也放行;
+  // 外部来的连接一律忽略其 PROXY 头(防止有人伪造源 IP)。
+  bool trust_loopback_proxy_protocol = 24;
+
   DomainStrategy domain_strategy = 8;
 
   string dialer_proxy = 9;

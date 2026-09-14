@@ -167,9 +167,10 @@ func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *S
 	}
 
 	l, err = callback(lc.Listen(ctx, network, address))
-	if err == nil && sockopt != nil && sockopt.AcceptProxyProtocol {
-		policyFunc := func(upstream net.Addr) (proxyproto.Policy, error) { return proxyproto.REQUIRE, nil }
-		l = &proxyproto.Listener{Listener: l, Policy: policyFunc}
+	if err == nil {
+		if policyFunc, enabled := proxyProtocolPolicyFor(sockopt); enabled {
+			l = &proxyproto.Listener{Listener: l, Policy: policyFunc}
+		}
 	}
 	return l, err
 }

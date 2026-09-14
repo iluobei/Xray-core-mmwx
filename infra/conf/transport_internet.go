@@ -1057,26 +1057,31 @@ func (h *HappyEyeballsConfig) UnmarshalJSON(data []byte) error {
 }
 
 type SocketConfig struct {
-	Mark                  int32                  `json:"mark"`
-	TFO                   interface{}            `json:"tcpFastOpen"`
-	TProxy                string                 `json:"tproxy"`
-	AcceptProxyProtocol   bool                   `json:"acceptProxyProtocol"`
-	DomainStrategy        string                 `json:"domainStrategy"`
-	DialerProxy           string                 `json:"dialerProxy"`
-	TCPKeepAliveInterval  int32                  `json:"tcpKeepAliveInterval"`
-	TCPKeepAliveIdle      int32                  `json:"tcpKeepAliveIdle"`
-	TCPCongestion         string                 `json:"tcpCongestion"`
-	TCPWindowClamp        int32                  `json:"tcpWindowClamp"`
-	TCPMaxSeg             int32                  `json:"tcpMaxSeg"`
-	Penetrate             bool                   `json:"penetrate"`
-	TCPUserTimeout        int32                  `json:"tcpUserTimeout"`
-	V6only                bool                   `json:"v6only"`
-	Interface             string                 `json:"interface"`
-	TcpMptcp              bool                   `json:"tcpMptcp"`
-	CustomSockopt         []*CustomSockoptConfig `json:"customSockopt"`
-	AddressPortStrategy   string                 `json:"addressPortStrategy"`
-	HappyEyeballsSettings *HappyEyeballsConfig   `json:"happyEyeballs"`
-	TrustedXForwardedFor  []string               `json:"trustedXForwardedFor"`
+	Mark                int32       `json:"mark"`
+	TFO                 interface{} `json:"tcpFastOpen"`
+	TProxy              string      `json:"tproxy"`
+	AcceptProxyProtocol bool        `json:"acceptProxyProtocol"`
+	// TrustLoopbackProxyProtocol 宽容模式:只信任来自本机的 PROXY 头,不带头的连接照常放行。
+	// acceptProxyProtocol 用的是 REQUIRE(没头就拒),放在 CDN/nginx 后面合适,
+	// 但本机中转 + 内部端口仍可能被老客户端直连的场景下会把他们全部打断。
+	// 详见 transport/internet/proxy_protocol_policy.go。
+	TrustLoopbackProxyProtocol bool                   `json:"trustLoopbackProxyProtocol"`
+	DomainStrategy             string                 `json:"domainStrategy"`
+	DialerProxy                string                 `json:"dialerProxy"`
+	TCPKeepAliveInterval       int32                  `json:"tcpKeepAliveInterval"`
+	TCPKeepAliveIdle           int32                  `json:"tcpKeepAliveIdle"`
+	TCPCongestion              string                 `json:"tcpCongestion"`
+	TCPWindowClamp             int32                  `json:"tcpWindowClamp"`
+	TCPMaxSeg                  int32                  `json:"tcpMaxSeg"`
+	Penetrate                  bool                   `json:"penetrate"`
+	TCPUserTimeout             int32                  `json:"tcpUserTimeout"`
+	V6only                     bool                   `json:"v6only"`
+	Interface                  string                 `json:"interface"`
+	TcpMptcp                   bool                   `json:"tcpMptcp"`
+	CustomSockopt              []*CustomSockoptConfig `json:"customSockopt"`
+	AddressPortStrategy        string                 `json:"addressPortStrategy"`
+	HappyEyeballsSettings      *HappyEyeballsConfig   `json:"happyEyeballs"`
+	TrustedXForwardedFor       []string               `json:"trustedXForwardedFor"`
 }
 
 // Build implements Buildable.
@@ -1177,26 +1182,27 @@ func (c *SocketConfig) Build() (*internet.SocketConfig, error) {
 	}
 
 	return &internet.SocketConfig{
-		Mark:                 c.Mark,
-		Tfo:                  tfo,
-		Tproxy:               tproxy,
-		DomainStrategy:       dStrategy,
-		AcceptProxyProtocol:  c.AcceptProxyProtocol,
-		DialerProxy:          c.DialerProxy,
-		TcpKeepAliveInterval: c.TCPKeepAliveInterval,
-		TcpKeepAliveIdle:     c.TCPKeepAliveIdle,
-		TcpCongestion:        c.TCPCongestion,
-		TcpWindowClamp:       c.TCPWindowClamp,
-		TcpMaxSeg:            c.TCPMaxSeg,
-		Penetrate:            c.Penetrate,
-		TcpUserTimeout:       c.TCPUserTimeout,
-		V6Only:               c.V6only,
-		Interface:            c.Interface,
-		TcpMptcp:             c.TcpMptcp,
-		CustomSockopt:        customSockopts,
-		AddressPortStrategy:  addressPortStrategy,
-		HappyEyeballs:        happyEyeballs,
-		TrustedXForwardedFor: c.TrustedXForwardedFor,
+		Mark:                       c.Mark,
+		Tfo:                        tfo,
+		Tproxy:                     tproxy,
+		DomainStrategy:             dStrategy,
+		AcceptProxyProtocol:        c.AcceptProxyProtocol,
+		TrustLoopbackProxyProtocol: c.TrustLoopbackProxyProtocol,
+		DialerProxy:                c.DialerProxy,
+		TcpKeepAliveInterval:       c.TCPKeepAliveInterval,
+		TcpKeepAliveIdle:           c.TCPKeepAliveIdle,
+		TcpCongestion:              c.TCPCongestion,
+		TcpWindowClamp:             c.TCPWindowClamp,
+		TcpMaxSeg:                  c.TCPMaxSeg,
+		Penetrate:                  c.Penetrate,
+		TcpUserTimeout:             c.TCPUserTimeout,
+		V6Only:                     c.V6only,
+		Interface:                  c.Interface,
+		TcpMptcp:                   c.TcpMptcp,
+		CustomSockopt:              customSockopts,
+		AddressPortStrategy:        addressPortStrategy,
+		HappyEyeballs:              happyEyeballs,
+		TrustedXForwardedFor:       c.TrustedXForwardedFor,
 	}, nil
 }
 
