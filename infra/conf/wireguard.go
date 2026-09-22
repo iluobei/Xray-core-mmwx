@@ -114,6 +114,15 @@ func (c *WireGuardConfig) Build() (proto.Message, error) {
 		})
 	}
 
+	// 服务端:重复公钥、allowed_ips 非规范或彼此重叠,NewServer 必然拒绝。在这里用同一套
+	// 规则提前拦下,LoadJSONConfig(写盘前的配置测试)就能发现,而不是等到入站被删掉重建、
+	// 或下次重启时整机 xray 起不来。规则不得比 NewServer 更严,见 ValidateDevicePeers。
+	if !c.IsClient {
+		if err := wireguard.ValidateDevicePeers(config.Users, config.Peers); err != nil {
+			return nil, err
+		}
+	}
+
 	if c.MTU == 0 {
 		config.Mtu = 1420
 	} else {

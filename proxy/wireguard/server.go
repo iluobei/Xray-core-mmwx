@@ -113,31 +113,97 @@ func NewServer(ctx context.Context, conf *DeviceConfig) (*Server, error) {
 //   - conf.Peers —— 旧形态,同一公钥未在 Users 出现时补一个无 email 的用户,
 //     保证既有配置行为不变(只是仍然没有用户身份,与今天一致)
 func (s *Server) loadUsers(conf *DeviceConfig) error {
-	for _, u := range conf.Users {
+	all, err := collectDeviceUsers(conf.Users, conf.Peers)
+	if err != nil {
+		return err
+	}
+	for _, u := range all {
+		s.users.Store(u.Account.(*MemoryAccount).Pub, u)
+	}
+	return nil
+}
+
+// ValidateDevicePeers 按 NewServer 加载时的同一套规则校验服务端(入站)设备的
+// 用户与匿名 peer,不创建任何设备。
+//
+// infra/conf 在 WireGuardConfig.Build(!IsClient)里调用它,让重复公钥、allowed_ips
+// 非规范或彼此重叠这类坏配置在 LoadJSONConfig 阶段就被拒绝。过去要等到 NewServer
+// 才炸:写盘前的配置测试(只跑 LoadJSONConfig)拦不住,整入站替换时旧入站已经删掉、
+// 新的又加不回来,下次重启整机 xray 起不来。
+//
+// 与 NewServer 共用 collectDeviceUsers,两处不会漂移:比 NewServer 更严会让原本
+// 能跑的配置升级后起不来,更松则拦不住上面的问题。
+func ValidateDevicePeers(users []*protocol.User, peers []*PeerConfig) error {
+	_, err := collectDeviceUsers(users, peers)
+	return err
+}
+
+// collectDeviceUsers 把 users 与匿名 peers 收敛成设备实际装载的用户集合,并做全部校验:
+//   - users:公钥按解码后的 32 字节比较、互不重复;非空 email 互不重复
+//   - peers:公钥已出现过(用户或更早的匿名 peer)的静默忽略 ——
+//     与过去 sync.Map.LoadOrStore 的语义一致,不报错,也不参与后面的重叠检查
+//   - 剩下的全体交给 validateAllowedIPs
+func collectDeviceUsers(users []*protocol.User, peers []*PeerConfig) ([]*protocol.MemoryUser, error) {
+	all := make([]*protocol.MemoryUser, 0, len(users)+len(peers))
+	seenPub := make(map[[32]byte]bool, len(users)+len(peers))
+	seenEmail := make(map[string]bool, len(users))
+
+	for _, u := range users {
 		mu, err := u.ToMemoryUser()
 		if err != nil {
-			return errors.New("failed to parse wireguard user ", u.Email).Base(err)
+			return nil, errors.New("failed to parse wireguard user ", u.Email).Base(err)
 		}
 		acc, ok := mu.Account.(*MemoryAccount)
 		if !ok {
-			return errors.New("unexpected account type for wireguard user ", u.Email)
+			return nil, errors.New("unexpected account type for wireguard user ", u.Email)
 		}
-		if _, dup := s.users.LoadOrStore(acc.Pub, mu); dup {
-			return errors.New("duplicated wireguard peer public key for user ", u.Email)
+		if seenPub[acc.Pub] {
+			return nil, errors.New("duplicated wireguard peer public key for user ", u.Email)
 		}
+		// 同一 email 两个 peer:RemoveUser(email) 只删得掉其中一个,两份流量记到同一个人头上。
+		if mu.Email != "" {
+			if seenEmail[mu.Email] {
+				return nil, errors.New("duplicated wireguard peer email ", mu.Email)
+			}
+			seenEmail[mu.Email] = true
+		}
+		seenPub[acc.Pub] = true
+		all = append(all, mu)
 	}
 
-	for _, p := range conf.Peers {
+	for _, p := range peers {
 		acc, err := p.AsAccount()
 		if err != nil {
-			return err
+			return nil, err
 		}
-		s.users.LoadOrStore(acc.(*MemoryAccount).Pub, &protocol.MemoryUser{Account: acc})
+		pub := acc.(*MemoryAccount).Pub
+		if seenPub[pub] {
+			continue
+		}
+		seenPub[pub] = true
+		all = append(all, &protocol.MemoryUser{Account: acc})
 	}
-	return s.validateUserAddrs(nil)
+
+	if err := validateAllowedIPs(all); err != nil {
+		return nil, err
+	}
+	return all, nil
 }
 
-// validateUserAddrs 校验 allowed_ips 足以作为「身份」使用。
+// validateUserAddrs 对当前 users 表加上待加入的 extra 做 validateAllowedIPs。
+func (s *Server) validateUserAddrs(extra *protocol.MemoryUser) error {
+	var all []*protocol.MemoryUser
+	s.users.Range(func(key, value any) bool {
+		all = append(all, value.(*protocol.MemoryUser))
+		return true
+	})
+	if extra != nil {
+		all = append(all, extra)
+	}
+	return validateAllowedIPs(all)
+}
+
+// validateAllowedIPs 校验 allowed_ips 足以作为「身份」使用。
 //
 // GetUserByAddr 是按隧道内源地址落到某个 peer 的 allowed_ips 上来归属流量的,
 // 所以地址集合一旦重叠,归属就取决于 sync.Map 的遍历顺序 —— 表现为流量、
@@ -145,7 +211,7 @@ func (s *Server) loadUsers(conf *DeviceConfig) error {
 //
 // 没有任何 peer 带 email 时直接放行:那是纯粹的旧配置,本来就没有用户身份,
 // allowed_ips 写 0.0.0.0/0 是合法且常见的,不能因为本次改动把它判成非法。
-func (s *Server) validateUserAddrs(extra *protocol.MemoryUser) error {
+func validateAllowedIPs(users []*protocol.MemoryUser) error {
 	type entry struct {
 		name string
 		acc  *MemoryAccount
@@ -153,10 +219,10 @@ func (s *Server) validateUserAddrs(extra *protocol.MemoryUser) error {
 
 	var all []entry
 	hasEmail := false
-	collect := func(u *protocol.MemoryUser) {
+	for _, u := range users {
 		acc, ok := u.Account.(*MemoryAccount)
 		if !ok {
-			return
+			continue
 		}
 		name := u.Email
 		if name == "" {
@@ -165,14 +231,6 @@ func (s *Server) validateUserAddrs(extra *protocol.MemoryUser) error {
 			hasEmail = true
 		}
 		all = append(all, entry{name, acc})
-	}
-
-	s.users.Range(func(key, value any) bool {
-		collect(value.(*protocol.MemoryUser))
-		return true
-	})
-	if extra != nil {
-		collect(extra)
 	}
 	if !hasEmail {
 		return nil
@@ -441,6 +499,11 @@ func (s *Server) AddUser(ctx context.Context, user *protocol.MemoryUser) error {
 	}
 	if _, dup := s.users.Load(peer.Pub); dup {
 		return errors.New("wireguard: peer public key already exists")
+	}
+	// 同 email 再加一个 peer(典型是换密钥时先加后删):RemoveUser(email) 之后只删得掉
+	// 其中一个,另一个继续以同一身份在线计费。换密钥必须先 RemoveUser 再 AddUser。
+	if user.Email != "" && s.GetUser(ctx, user.Email) != nil {
+		return errors.New("wireguard: peer email already exists: ", user.Email)
 	}
 	if err := s.validateUserAddrs(user); err != nil {
 		return err
