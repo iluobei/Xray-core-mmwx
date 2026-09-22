@@ -280,7 +280,8 @@ func (w *VisionReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 		readerConn, readCounter, _ := UnwrapRawConn(w.conn)
 		// 给 mmw-agent 这类下游一次包装底层 conn 的机会(per-user 限速),
 		// 未注册 hook 时原样返回,无开销。详见 vision_limiter_hook.go。
-		readerConn = maybeWrapVisionConn(w.ctx, readerConn)
+		// isUplink 的 Reader 读的是客户端连接(入站侧);!isUplink 的是出站侧读落地服务器。
+		readerConn = maybeWrapVisionConn(w.ctx, readerConn, w.isUplink)
 		w.directReadCounter = readCounter
 		w.Reader = buf.NewReader(readerConn)
 	}
@@ -345,7 +346,8 @@ func (w *VisionWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 		}
 		rawConn, _, writerCounter := UnwrapRawConn(w.conn)
 		// 同 Reader 路径,给下游 per-user 限速钩子一次机会包装底层 conn。
-		rawConn = maybeWrapVisionConn(w.ctx, rawConn)
+		// !isUplink 的 Writer 写的是客户端连接(入站侧);isUplink 的是出站侧写往落地服务器。
+		rawConn = maybeWrapVisionConn(w.ctx, rawConn, !w.isUplink)
 		w.Writer = buf.NewWriter(rawConn)
 		w.directWriteCounter = writerCounter
 		*switchToDirectCopy = false
