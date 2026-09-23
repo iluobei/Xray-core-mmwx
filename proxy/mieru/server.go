@@ -26,7 +26,12 @@ import (
 
 // Server 是 mieru 入站处理器。
 type Server struct {
-	users         []*protocol.MemoryUser
+	// userMu 只保护 users。users 是 copy-on-write 的:写侧(user.go 的 AddUser/RemoveUser)
+	// 永远新建一份 slice 再整体替换,绝不原地 append/删除;读侧因此只需在 RLock 里复制一次
+	// slice header 就能出锁,之后遍历的是一份再也不会被改写的快照(见 snapshotUsers)。
+	userMu sync.RWMutex
+	users  []*protocol.MemoryUser
+
 	policyManager policy.Manager
 }
 
@@ -88,14 +93,15 @@ func (s *Server) resolveUser(br *bufio.Reader) (*protocol.MemoryUser, cipher.AEA
 		}
 		return nil, false
 	}
-	for _, u := range s.users {
+	users := s.snapshotUsers()
+	for _, u := range users {
 		if nonceMatchesUser(u.Account.(*MemoryAccount).Username, nonce) {
 			if aead, ok := tryUser(u); ok {
 				return u, aead, nonce, nil
 			}
 		}
 	}
-	for _, u := range s.users { // 兜底:tag 未命中也全试一遍
+	for _, u := range users { // 兜底:tag 未命中也全试一遍
 		if aead, ok := tryUser(u); ok {
 			return u, aead, nonce, nil
 		}

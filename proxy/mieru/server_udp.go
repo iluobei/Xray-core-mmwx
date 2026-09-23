@@ -44,14 +44,15 @@ func (s *Server) resolveUDPUser(firstPkt []byte) (*protocol.MemoryUser, cipher.A
 		}
 		return nil
 	}
-	for _, u := range s.users {
+	users := s.snapshotUsers()
+	for _, u := range users {
 		if nonceMatchesUser(u.Account.(*MemoryAccount).Username, nonce) {
 			if aead := tryUser(u); aead != nil {
 				return u, aead, nil
 			}
 		}
 	}
-	for _, u := range s.users {
+	for _, u := range users {
 		if aead := tryUser(u); aead != nil {
 			return u, aead, nil
 		}

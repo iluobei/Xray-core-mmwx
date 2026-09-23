@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -30,8 +31,14 @@ import (
 // 限连接数;unsafe-raw 无任何密钥无法区分用户,回落首个用户。
 type Server struct {
 	policyManager policy.Manager
-	users         []*protocol.MemoryUser
-	obfs          obfsConfig
+
+	// userMu 只保护 users。users 是 copy-on-write 的:写侧(user.go 的 AddUser/RemoveUser)
+	// 永远新建一份 slice 再整体替换,绝不原地 append/删除;读侧因此只需在 RLock 里复制一次
+	// slice header 就能出锁,之后遍历的是一份再也不会被改写的快照(见 snapshotUsers)。
+	userMu sync.RWMutex
+	users  []*protocol.MemoryUser
+
+	obfs obfsConfig
 
 	// v6 专用(version==6 时生效)
 	version uint32
@@ -100,7 +107,7 @@ func (s *Server) handshake(conn xnet.Conn) (*recordReader, *protocol.MemoryUser,
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, u := range s.users {
+	for _, u := range s.snapshotUsers() {
 		acc, ok := u.Account.(*MemoryAccount)
 		if !ok {
 			continue
@@ -182,7 +189,13 @@ func (s *Server) processV6(ctx context.Context, conn stat.Connection, dispatcher
 func (s *Server) identifyV6User(conn io.Reader) (*protocol.MemoryUser, *Profile, []byte, error) {
 	switch s.v6Mode {
 	case ModeUnsafeRaw:
-		return s.users[0], nil, nil, nil
+		// RemoveUser 拒绝删掉最后一个用户,正是为了让这里的 users[0] 永远有得取;
+		// 仍然兜一手,是因为这条索引一旦越界就是整个 xray 进程 panic。
+		users := s.snapshotUsers()
+		if len(users) == 0 {
+			return nil, nil, nil, errors.New("snell v6 raw: no users")
+		}
+		return users[0], nil, nil, nil
 	case ModeUnshaped:
 		return s.identifyV6Unshaped(conn)
 	default:
@@ -198,7 +211,7 @@ func (s *Server) identifyV6Unshaped(conn io.Reader) (*protocol.MemoryUser, *Prof
 	}
 	salt := head[:saltLen]
 	nonce := make([]byte, nonceLen)
-	for _, u := range s.users {
+	for _, u := range s.snapshotUsers() {
 		aead, err := newAEAD(deriveKey(u.Account.(*MemoryAccount).PSK, salt))
 		if err != nil {
 			continue
@@ -221,8 +234,9 @@ func (s *Server) identifyV6Shaped(conn io.Reader) (*protocol.MemoryUser, *Profil
 		profile *Profile
 		need    int
 	}
-	cands := make([]candidate, len(s.users))
-	for i, u := range s.users {
+	users := s.snapshotUsers()
+	cands := make([]candidate, len(users))
+	for i, u := range users {
 		p := NewProfile(u.Account.(*MemoryAccount).PSK)
 		cands[i] = candidate{user: u, profile: p, need: p.saltBlockLen + p.recordPrefixLen(0) + headerCipherLen}
 	}
