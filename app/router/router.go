@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
@@ -17,9 +18,16 @@ import (
 // Router is an implementation of routing.Router.
 type Router struct {
 	domainStrategy Config_DomainStrategy
-	rules          []*Rule
-	balancers      map[string]*Balancer
-	dns            dns.Client
+	// rules 用 copy-on-write 发布。
+	//
+	// pickRouteInternal 每条连接都要遍历它,而 ReloadRules / RemoveRule 会在运行期整份换掉。
+	// 原先读侧不持锁、写侧持 mu 原地改同一个 slice —— 读到半截的 slice header 就是数据竞争。
+	// 之所以一直没炸,只是因为**从来没有人在运行期改过路由规则**(agent 一律重启进程)。
+	// 现在写侧在锁内构造一份全新的 slice、一次性 Store,读侧 Load 一份快照遍历:
+	// 读侧零锁、零阻塞,换规则对在跑的连接不可见。
+	rules     atomic.Pointer[[]*Rule]
+	balancers map[string]*Balancer
+	dns       dns.Client
 
 	ctx        context.Context
 	ohm        outbound.Manager
@@ -33,6 +41,19 @@ type Route struct {
 	outboundGroupTags []string
 	outboundTag       string
 	ruleTag           string
+}
+
+// ruleSnapshot 取当前发布的规则快照。返回的 slice 是只读的,调用方绝不能就地改。
+func (r *Router) ruleSnapshot() []*Rule {
+	if p := r.rules.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// storeRules 发布一份新的规则集。只能在持有 r.mu 时调用。
+func (r *Router) storeRules(rules []*Rule) {
+	r.rules.Store(&rules)
 }
 
 // Init initializes the Router.
@@ -53,11 +74,20 @@ func (r *Router) Init(ctx context.Context, config *Config, d dns.Client, ohm out
 		r.balancers[rule.Tag] = balancer
 	}
 
-	r.rules = make([]*Rule, 0, len(config.Rule))
+	rules := make([]*Rule, 0, len(config.Rule))
+	// 出错时要关掉**本次已经建出来的**通知器,不能用 r.closeWebhooks()(那读的是已发布的快照,
+	// 此刻还是空的),否则每条失败路径都漏一个 webhook。
+	closeBuilt := func() {
+		for _, rr := range rules {
+			if rr.Webhook != nil {
+				rr.Webhook.Close()
+			}
+		}
+	}
 	for _, rule := range config.Rule {
 		cond, err := rule.BuildCondition()
 		if err != nil {
-			r.closeWebhooks()
+			closeBuilt()
 			return err
 		}
 		rr := &Rule{
@@ -68,7 +98,7 @@ func (r *Router) Init(ctx context.Context, config *Config, d dns.Client, ohm out
 		if wh := rule.GetWebhook(); wh != nil {
 			notifier, err := NewWebhookNotifier(wh)
 			if err != nil {
-				r.closeWebhooks()
+				closeBuilt()
 				return err
 			}
 			rr.Webhook = notifier
@@ -80,13 +110,14 @@ func (r *Router) Init(ctx context.Context, config *Config, d dns.Client, ohm out
 				if rr.Webhook != nil {
 					rr.Webhook.Close()
 				}
-				r.closeWebhooks()
+				closeBuilt()
 				return errors.New("balancer ", btag, " not found")
 			}
 			rr.Balancer = brule
 		}
-		r.rules = append(r.rules, rr)
+		rules = append(rules, rr)
 	}
+	r.storeRules(rules)
 
 	return nil
 }
@@ -125,14 +156,19 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// 全程在本地 newRules 上构造,成功才一次性发布;任何一条失败都直接返回,
+	// 已发布的那份规则原样不动 —— 读侧永远看不到"改了一半"的状态。
+	var newRules []*Rule
 	if !shouldAppend {
-		for _, rule := range r.rules {
+		for _, rule := range r.ruleSnapshot() {
 			if rule.Webhook != nil {
 				rule.Webhook.Close()
 			}
 		}
 		r.balancers = make(map[string]*Balancer, len(config.BalancingRule))
-		r.rules = make([]*Rule, 0, len(config.Rule))
+		newRules = make([]*Rule, 0, len(config.Rule))
+	} else {
+		newRules = append([]*Rule(nil), r.ruleSnapshot()...)
 	}
 	for _, rule := range config.BalancingRule {
 		_, found := r.balancers[rule.Tag]
@@ -147,18 +183,31 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
 		r.balancers[rule.Tag] = balancer
 	}
 
-	startIdx := len(r.rules)
+	startIdx := len(newRules)
 	closeNewWebhooks := func() {
-		for i := startIdx; i < len(r.rules); i++ {
-			if r.rules[i].Webhook != nil {
-				r.rules[i].Webhook.Close()
+		for i := startIdx; i < len(newRules); i++ {
+			if newRules[i].Webhook != nil {
+				newRules[i].Webhook.Close()
 			}
 		}
-		r.rules = r.rules[:startIdx]
+		newRules = newRules[:startIdx]
+	}
+	// 重名检查要对着**正在构造的**这份查,不能查已发布的快照:append 模式下本次新加的
+	// 规则还没发布,查快照会漏掉"同一批里自己跟自己重名"。
+	ruleTagTaken := func(tag string) bool {
+		if tag == "" {
+			return false
+		}
+		for _, rule := range newRules {
+			if rule.RuleTag == tag {
+				return true
+			}
+		}
+		return false
 	}
 
 	for _, rule := range config.Rule {
-		if r.RuleExists(rule.GetRuleTag()) {
+		if ruleTagTaken(rule.GetRuleTag()) {
 			closeNewWebhooks()
 			return errors.New("duplicate ruleTag ", rule.GetRuleTag())
 		}
@@ -192,15 +241,16 @@ func (r *Router) ReloadRules(config *Config, shouldAppend bool) error {
 			}
 			rr.Balancer = brule
 		}
-		r.rules = append(r.rules, rr)
+		newRules = append(newRules, rr)
 	}
+	r.storeRules(newRules)
 
 	return nil
 }
 
 func (r *Router) RuleExists(tag string) bool {
 	if tag != "" {
-		for _, rule := range r.rules {
+		for _, rule := range r.ruleSnapshot() {
 			if rule.RuleTag == tag {
 				return true
 			}
@@ -216,14 +266,14 @@ func (r *Router) RemoveRule(tag string) error {
 
 	newRules := []*Rule{}
 	if tag != "" {
-		for _, rule := range r.rules {
+		for _, rule := range r.ruleSnapshot() {
 			if rule.RuleTag != tag {
 				newRules = append(newRules, rule)
 			} else if rule.Webhook != nil {
 				rule.Webhook.Close()
 			}
 		}
-		r.rules = newRules
+		r.storeRules(newRules)
 		return nil
 	}
 	return errors.New("empty tag name!")
@@ -235,7 +285,7 @@ func (r *Router) ListRule() []routing.Route {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ruleList := make([]routing.Route, 0)
-	for _, rule := range r.rules {
+	for _, rule := range r.ruleSnapshot() {
 		ruleList = append(ruleList, &Route{
 			outboundTag: rule.Tag,
 			ruleTag:     rule.RuleTag,
@@ -254,7 +304,8 @@ func (r *Router) pickRouteInternal(ctx routing.Context) (*Rule, routing.Context,
 		ctx = routing_dns.ContextWithDNSClient(ctx, r.dns)
 	}
 
-	for _, rule := range r.rules {
+	rules := r.ruleSnapshot()
+	for _, rule := range rules {
 		if rule.Apply(ctx) {
 			return rule, ctx, nil
 		}
@@ -266,8 +317,9 @@ func (r *Router) pickRouteInternal(ctx routing.Context) (*Rule, routing.Context,
 
 	ctx = routing_dns.ContextWithDNSClient(ctx, r.dns)
 
-	// Try applying rules again if we have IPs.
-	for _, rule := range r.rules {
+	// Try applying rules again if we have IPs。用上面取的同一份快照:
+	// 两趟必须看同一组规则,中途被换掉会出现"第一趟没匹配、第二趟规则已经变了"。
+	for _, rule := range rules {
 		if rule.Apply(ctx) {
 			return rule, ctx, nil
 		}
@@ -283,7 +335,7 @@ func (r *Router) Start() error {
 
 // closeWebhooks closes all webhook notifiers in the current rule set.
 func (r *Router) closeWebhooks() {
-	for _, rule := range r.rules {
+	for _, rule := range r.ruleSnapshot() {
 		if rule.Webhook != nil {
 			rule.Webhook.Close()
 		}
