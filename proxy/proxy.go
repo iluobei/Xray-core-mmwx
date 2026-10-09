@@ -13,10 +13,12 @@ import (
 	"math/big"
 	"runtime"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/pires/go-proxyproto"
 	"github.com/xtls/xray-core/app/dispatcher"
+	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
@@ -795,6 +797,57 @@ func spliceCopyAccounted(dst io.Writer, src io.Reader, account func(int64)) erro
 	}
 }
 
+// spliceSegmentMax 是分段直通单段的上限。
+const spliceSegmentMax = 1 << 20
+
+// spliceFramed 是给设了 session.SpliceFramer 的入站用的直通,目标读完返回 nil。
+//
+// 每一段先问清源连接的接收缓冲里现在有多少字节,把这个数告诉入站(它据此在连接上写分段头),
+// 再把恰好这么多字节搬过去——它们已经在内核里,声明了就一定搬得完,不会卡在半段上。
+// 每段搬完就记账,所以统计的滞后不超过一段。
+//
+// 分段头和这一段的数据之间塞住发送(TCP_CORK):否则入站那条几十字节的分段头会单独占一个包,
+// 小段(交互式流量)的包数直接翻倍。
+//
+// 给 Finish 的 err 只在「某一段没写完」时非 nil;两段之间读源连接出的错(对端重置、本端取消)不算——
+// 那时连接上的分段仍是完整的,入站还能接着用这条连接。
+func spliceFramed(dst io.Writer, src net.Conn, f session.SpliceFramer, closeLink func(), account func(int64)) error {
+	if err := f.Handoff(closeLink); err != nil {
+		return err
+	}
+	var broken error
+	defer func() { f.Finish(broken) }()
+	for {
+		n, err := readableBytes(src)
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if n > spliceSegmentMax {
+			n = spliceSegmentMax
+		}
+		setCork(dst, true)
+		ok, err := f.Segment(n)
+		if err != nil || !ok {
+			setCork(dst, false)
+			broken = err // 分段头没写出去:连接已经不能用了;入站叫停则是 nil
+			return err
+		}
+		w, err := io.CopyN(dst, src, n)
+		setCork(dst, false)
+		if w > 0 {
+			account(w)
+		}
+		if err != nil {
+			broken = err
+			return err
+		}
+		f.Written()
+	}
+}
+
 func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net.Conn, writer buf.Writer, timer *signal.ActivityTimer, inTimer *signal.ActivityTimer) error {
 	readerConn, readCounter, _ := UnwrapRawConn(readerConn)
 	writerConn, _, writeCounter := UnwrapRawConn(writerConn)
@@ -808,6 +861,10 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 	}
 	inbound := session.InboundFromContext(ctx)
 	if inbound == nil || inbound.CanSpliceCopy == 3 {
+		return readV(ctx, reader, writer, timer, readCounter)
+	}
+	// 分段直通要先知道源连接里有多少字节可读,拿不到 fd 的连接做不了。
+	if _, ok := readerConn.(syscall.Conn); inbound.SpliceFramer != nil && !ok {
 		return readV(ctx, reader, writer, timer, readCounter)
 	}
 	outbounds := session.OutboundsFromContext(ctx)
@@ -844,7 +901,7 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 			// 于是一条长连接(大文件下载 / 视频 / BT)可以跑掉几十 GB 而流量额度那侧
 			// 一动不动,超额判定要等这条连接断了才看得见 —— 用户实报「超了几十个 G
 			// 才被移除访问权限」。同类问题见 0404f82b(SS2022 关闭后计数滞后 300 秒)。
-			err := spliceCopyAccounted(tc, readerConn, func(n int64) {
+			account := func(n int64) {
 				if readCounter != nil {
 					readCounter.Add(n) // outbound stats
 				}
@@ -854,7 +911,11 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 				if statWriter != nil {
 					statWriter.Counter.Add(n) // user stats
 				}
-			})
+			}
+			if f := inbound.SpliceFramer; f != nil {
+				return spliceFramed(tc, readerConn, f, func() { _ = common.Close(writer) }, account)
+			}
+			err := spliceCopyAccounted(tc, readerConn, account)
 			if err != nil && errors.Cause(err) != io.EOF {
 				return err
 			}
