@@ -38,7 +38,16 @@ message ServerConfig {
   ShadowTLSConfig shadow_tls = 2;
 }
 
+// 出站的 ShadowTLS v3 外壳(仅 v4/v5,与 obfs 互斥):先以 server_name 为 SNI 经服务端跟握手服务器完成
+// 一次真实的 TLS 1.3 握手,之后的 Snell 数据装在 ApplicationData 记录里。
+message ShadowTLSClientConfig {
+  string password = 1;
+  // 握手 SNI,即服务端 handshake 配置的域名(不含端口)。
+  string server_name = 2;
+}
+
 message ClientConfig {
   // server.User 携带 Account(psk/version/obfs)。
   xray.common.protocol.ServerEndpoint server = 1;
+  ShadowTLSClientConfig shadow_tls = 2;
 }

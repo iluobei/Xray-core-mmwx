@@ -93,6 +93,13 @@ func (c *SnellShadowTLS) build(users []*SnellUser) (*snell.ShadowTLSConfig, erro
 	return &snell.ShadowTLSConfig{Password: c.Password, Handshake: host, Strict: strict}, nil
 }
 
+// SnellClientShadowTLS 出站的 ShadowTLS v3 外壳(见 proxy/snell 的 ShadowTLSClientConfig)。
+type SnellClientShadowTLS struct {
+	Password string `json:"password"`
+	// ServerName 握手 SNI,即服务端 handshake 的域名;只写 host,不带端口。
+	ServerName string `json:"serverName"`
+}
+
 type SnellClientConfig struct {
 	Address  *Address `json:"address"`
 	Port     uint16   `json:"port"`
@@ -104,6 +111,8 @@ type SnellClientConfig struct {
 	V6Mode   string   `json:"v6Mode"`
 	ClientID string   `json:"clientId"`
 	Level    uint32   `json:"level"`
+
+	ShadowTLS *SnellClientShadowTLS `json:"shadowTls"`
 }
 
 func (c *SnellClientConfig) Build() (proto.Message, error) {
@@ -113,7 +122,15 @@ func (c *SnellClientConfig) Build() (proto.Message, error) {
 	if c.PSK == "" {
 		return nil, errors.New("SNELL: psk is required")
 	}
+	var st *snell.ShadowTLSClientConfig
+	if c.ShadowTLS != nil {
+		var err error
+		if st, err = c.ShadowTLS.build(c.Version, c.ObfsMode); err != nil {
+			return nil, err
+		}
+	}
 	return &snell.ClientConfig{
+		ShadowTls: st,
 		Server: &protocol.ServerEndpoint{
 			Address: c.Address.Build(),
 			Port:    uint32(c.Port),
@@ -131,4 +148,24 @@ func (c *SnellClientConfig) Build() (proto.Message, error) {
 			},
 		},
 	}, nil
+}
+
+func (c *SnellClientShadowTLS) build(version uint32, obfsMode string) (*snell.ShadowTLSClientConfig, error) {
+	if c.Password == "" {
+		return nil, errors.New("SNELL: shadowTls.password is required")
+	}
+	name := strings.TrimSpace(c.ServerName)
+	if name == "" {
+		return nil, errors.New("SNELL: shadowTls.serverName is required")
+	}
+	if strings.ContainsAny(name, ":/ ") {
+		return nil, errors.New("SNELL: shadowTls.serverName must be a host name without port: ", c.ServerName)
+	}
+	if version == 6 {
+		return nil, errors.New("SNELL: shadowTls only supports snell v4/v5")
+	}
+	if m := strings.ToLower(obfsMode); m != "" && m != "none" {
+		return nil, errors.New("SNELL: shadowTls cannot be combined with obfs ", obfsMode)
+	}
+	return &snell.ShadowTLSClientConfig{Password: c.Password, ServerName: name}, nil
 }

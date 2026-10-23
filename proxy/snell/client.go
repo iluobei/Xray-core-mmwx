@@ -3,6 +3,7 @@ package snell
 import (
 	"bytes"
 	"context"
+	"net"
 
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -10,6 +11,7 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/retry"
 	"github.com/xtls/xray-core/common/session"
+	"github.com/xtls/xray-core/common/shadowtls"
 	"github.com/xtls/xray-core/common/signal"
 	"github.com/xtls/xray-core/common/task"
 	"github.com/xtls/xray-core/core"
@@ -24,6 +26,8 @@ type Client struct {
 	server        *protocol.ServerSpec
 	policyManager policy.Manager
 	obfs          obfsConfig
+	// shadowTLS 非空时拨通后先过 ShadowTLS v3 外壳(仅 v4/v5,与 obfs 互斥)。
+	shadowTLS *shadowtls.ClientConfig
 
 	// v6 专用
 	version  uint32
@@ -54,6 +58,19 @@ func NewClient(ctx context.Context, config *ClientConfig) (*Client, error) {
 		version:       account.Version,
 		clientID:      account.ClientID,
 	}
+	if st := config.GetShadowTls(); st != nil {
+		// 与入站同样的限制:v6 自带整形、obfs 本身就是另一层外壳,都不能再套 ShadowTLS。
+		if account.Version == 6 {
+			return nil, errors.New("snell: shadowTls only supports snell v4/v5")
+		}
+		if m, _ := parseObfsMode(account.ObfsMode); m != obfsModeNone {
+			return nil, errors.New("snell: shadowTls cannot be combined with obfs ", account.ObfsMode)
+		}
+		if st.Password == "" || st.ServerName == "" {
+			return nil, errors.New("snell: shadowTls password and serverName are required")
+		}
+		c.shadowTLS = &shadowtls.ClientConfig{Password: st.Password, ServerName: st.ServerName}
+	}
 	if account.Version == 6 {
 		if len(account.PSK) < 12 || len(account.PSK) > 255 {
 			return nil, errors.New("snell: v6 psk length must be 12..255 bytes")
@@ -77,7 +94,7 @@ func NewClient(ctx context.Context, config *ClientConfig) (*Client, error) {
 }
 
 // newRW 按版本建收发对(v6 无 obfs,shaped/unshaped/raw;v4/v5 obfs + record)。
-func (c *Client) newRW(conn stat.Connection, account *MemoryAccount) (snellWriter, snellReader, error) {
+func (c *Client) newRW(conn net.Conn, account *MemoryAccount) (snellWriter, snellReader, error) {
 	if c.version == 6 {
 		w, err := newV6Writer(conn, c.v6Mode, account.PSK, c.profile)
 		if err != nil {
@@ -116,7 +133,16 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 	account := c.server.User.Account.(*MemoryAccount)
 	sessPolicy := c.policyManager.ForLevel(0)
 
-	writer, reader, err := c.newRW(conn, account)
+	var inner net.Conn = conn
+	if c.shadowTLS != nil {
+		st, err := shadowtls.Client(ctx, conn, c.shadowTLS)
+		if err != nil {
+			return errors.New("snell: shadowtls").Base(err)
+		}
+		inner = st
+	}
+
+	writer, reader, err := c.newRW(inner, account)
 	if err != nil {
 		return errors.New("snell: setup").Base(err)
 	}

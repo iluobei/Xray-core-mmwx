@@ -227,17 +227,73 @@ func (x *ServerConfig) GetShadowTls() *ShadowTLSConfig {
 	return nil
 }
 
+// 出站的 ShadowTLS v3 外壳(仅 v4/v5,与 obfs 互斥):先以 server_name 为 SNI 经服务端跟握手服务器完成
+// 一次真实的 TLS 1.3 握手,之后的 Snell 数据装在 ApplicationData 记录里。
+type ShadowTLSClientConfig struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Password string                 `protobuf:"bytes,1,opt,name=password,proto3" json:"password,omitempty"`
+	// 握手 SNI,即服务端 handshake 配置的域名(不含端口)。
+	ServerName    string `protobuf:"bytes,2,opt,name=server_name,json=serverName,proto3" json:"server_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShadowTLSClientConfig) Reset() {
+	*x = ShadowTLSClientConfig{}
+	mi := &file_proxy_snell_config_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShadowTLSClientConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShadowTLSClientConfig) ProtoMessage() {}
+
+func (x *ShadowTLSClientConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_proxy_snell_config_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShadowTLSClientConfig.ProtoReflect.Descriptor instead.
+func (*ShadowTLSClientConfig) Descriptor() ([]byte, []int) {
+	return file_proxy_snell_config_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ShadowTLSClientConfig) GetPassword() string {
+	if x != nil {
+		return x.Password
+	}
+	return ""
+}
+
+func (x *ShadowTLSClientConfig) GetServerName() string {
+	if x != nil {
+		return x.ServerName
+	}
+	return ""
+}
+
 type ClientConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// server.User 携带 Account(psk/version/obfs)。
 	Server        *protocol.ServerEndpoint `protobuf:"bytes,1,opt,name=server,proto3" json:"server,omitempty"`
+	ShadowTls     *ShadowTLSClientConfig   `protobuf:"bytes,2,opt,name=shadow_tls,json=shadowTls,proto3" json:"shadow_tls,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ClientConfig) Reset() {
 	*x = ClientConfig{}
-	mi := &file_proxy_snell_config_proto_msgTypes[3]
+	mi := &file_proxy_snell_config_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -249,7 +305,7 @@ func (x *ClientConfig) String() string {
 func (*ClientConfig) ProtoMessage() {}
 
 func (x *ClientConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proxy_snell_config_proto_msgTypes[3]
+	mi := &file_proxy_snell_config_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -262,12 +318,19 @@ func (x *ClientConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientConfig.ProtoReflect.Descriptor instead.
 func (*ClientConfig) Descriptor() ([]byte, []int) {
-	return file_proxy_snell_config_proto_rawDescGZIP(), []int{3}
+	return file_proxy_snell_config_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ClientConfig) GetServer() *protocol.ServerEndpoint {
 	if x != nil {
 		return x.Server
+	}
+	return nil
+}
+
+func (x *ClientConfig) GetShadowTls() *ShadowTLSClientConfig {
+	if x != nil {
+		return x.ShadowTls
 	}
 	return nil
 }
@@ -291,9 +354,15 @@ const file_proxy_snell_config_proto_rawDesc = "" +
 	"\fServerConfig\x120\n" +
 	"\x05users\x18\x01 \x03(\v2\x1a.xray.common.protocol.UserR\x05users\x12@\n" +
 	"\n" +
-	"shadow_tls\x18\x02 \x01(\v2!.xray.proxy.snell.ShadowTLSConfigR\tshadowTls\"L\n" +
+	"shadow_tls\x18\x02 \x01(\v2!.xray.proxy.snell.ShadowTLSConfigR\tshadowTls\"T\n" +
+	"\x15ShadowTLSClientConfig\x12\x1a\n" +
+	"\bpassword\x18\x01 \x01(\tR\bpassword\x12\x1f\n" +
+	"\vserver_name\x18\x02 \x01(\tR\n" +
+	"serverName\"\x94\x01\n" +
 	"\fClientConfig\x12<\n" +
-	"\x06server\x18\x01 \x01(\v2$.xray.common.protocol.ServerEndpointR\x06serverBR\n" +
+	"\x06server\x18\x01 \x01(\v2$.xray.common.protocol.ServerEndpointR\x06server\x12F\n" +
+	"\n" +
+	"shadow_tls\x18\x02 \x01(\v2'.xray.proxy.snell.ShadowTLSClientConfigR\tshadowTlsBR\n" +
 	"\x14com.xray.proxy.snellP\x01Z%github.com/xtls/xray-core/proxy/snell\xaa\x02\x10Xray.Proxy.Snellb\x06proto3"
 
 var (
@@ -308,24 +377,26 @@ func file_proxy_snell_config_proto_rawDescGZIP() []byte {
 	return file_proxy_snell_config_proto_rawDescData
 }
 
-var file_proxy_snell_config_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_proxy_snell_config_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_proxy_snell_config_proto_goTypes = []any{
 	(*Account)(nil),                 // 0: xray.proxy.snell.Account
 	(*ShadowTLSConfig)(nil),         // 1: xray.proxy.snell.ShadowTLSConfig
 	(*ServerConfig)(nil),            // 2: xray.proxy.snell.ServerConfig
-	(*ClientConfig)(nil),            // 3: xray.proxy.snell.ClientConfig
-	(*protocol.User)(nil),           // 4: xray.common.protocol.User
-	(*protocol.ServerEndpoint)(nil), // 5: xray.common.protocol.ServerEndpoint
+	(*ShadowTLSClientConfig)(nil),   // 3: xray.proxy.snell.ShadowTLSClientConfig
+	(*ClientConfig)(nil),            // 4: xray.proxy.snell.ClientConfig
+	(*protocol.User)(nil),           // 5: xray.common.protocol.User
+	(*protocol.ServerEndpoint)(nil), // 6: xray.common.protocol.ServerEndpoint
 }
 var file_proxy_snell_config_proto_depIdxs = []int32{
-	4, // 0: xray.proxy.snell.ServerConfig.users:type_name -> xray.common.protocol.User
+	5, // 0: xray.proxy.snell.ServerConfig.users:type_name -> xray.common.protocol.User
 	1, // 1: xray.proxy.snell.ServerConfig.shadow_tls:type_name -> xray.proxy.snell.ShadowTLSConfig
-	5, // 2: xray.proxy.snell.ClientConfig.server:type_name -> xray.common.protocol.ServerEndpoint
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	6, // 2: xray.proxy.snell.ClientConfig.server:type_name -> xray.common.protocol.ServerEndpoint
+	3, // 3: xray.proxy.snell.ClientConfig.shadow_tls:type_name -> xray.proxy.snell.ShadowTLSClientConfig
+	4, // [4:4] is the sub-list for method output_type
+	4, // [4:4] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_proxy_snell_config_proto_init() }
@@ -339,7 +410,7 @@ func file_proxy_snell_config_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proxy_snell_config_proto_rawDesc), len(file_proxy_snell_config_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

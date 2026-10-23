@@ -1,4 +1,4 @@
-// Package shadowtls 是 ShadowTLS v3 的服务端。
+// Package shadowtls 是 ShadowTLS v3 的服务端与客户端(客户端见 client.go)。
 //
 // 按原作者公开的协议文档(ihciah/shadow-tls 的 docs/protocol-v3-en.md,MIT)独立实现,
 // 不含 sing-shadowtls / mihomo 的任何代码(两者是 GPL)。
@@ -159,7 +159,7 @@ func Accept(ctx context.Context, conn net.Conn, cfg *Config) (net.Conn, error) {
 		return nil, errors.New("shadowtls: forward handshake").Base(err)
 	}
 
-	return &serverConn{
+	return &dataConn{
 		Conn:        conn,
 		pending:     firstData,
 		hmacRead:    hmacClient,
@@ -295,15 +295,19 @@ func relay(a, b net.Conn) {
 	wg.Wait()
 }
 
-// serverConn 切换之后的数据连接:读端剥 ApplicationData 头并校验 HMAC_ServerRandomC,
-// 写端把数据装进 ApplicationData 并加 HMAC_ServerRandomS。两个 HMAC 都是流式的:
-// 每帧先喂数据、取 4 字节,再把这 4 字节喂回去(防止截断拼接)。
-type serverConn struct {
+// dataConn 切换之后的数据连接(服务端与客户端共用):读端剥 ApplicationData 头并校验对端的 HMAC
+// (服务端读 HMAC_ServerRandomC、客户端读 HMAC_ServerRandomS),写端把数据装进 ApplicationData 并加自己这一侧的 HMAC。
+// 两个 HMAC 都是流式的:每帧先喂数据、取 4 字节,再把这 4 字节喂回去(防止截断拼接)。
+type dataConn struct {
 	net.Conn
 
 	readMu   sync.Mutex
 	pending  []byte
 	hmacRead *streamHMAC
+	// residual 仅客户端用:服务端切换前还会转来几帧握手服务器的 ApplicationData(如 TLS 1.3 的 NewSessionTicket),
+	// 带的是 HMAC_ServerRandom 标记,丢掉即可。按协议,收到第一帧服务端自己的数据(HMAC_ServerRandomS)后
+	// 这个分支即关闭,置空。
+	residual *streamHMAC
 
 	writeMu   sync.Mutex
 	hmacWrite *streamHMAC
@@ -312,7 +316,7 @@ type serverConn struct {
 	alertOnFail bool
 }
 
-func (c *serverConn) Read(p []byte) (int, error) {
+func (c *dataConn) Read(p []byte) (int, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 	for len(c.pending) == 0 {
@@ -333,13 +337,27 @@ func (c *serverConn) Read(p []byte) (int, error) {
 			return 0, errors.New("shadowtls: short record")
 		}
 		data := rec[recordHeaderLen+hmacLen:]
-		c.hmacRead.write(data)
-		sum := c.hmacRead.sum4()
-		c.hmacRead.write(sum[:])
-		if !bytes.Equal(sum[:], rec[recordHeaderLen:recordHeaderLen+hmacLen]) {
+		mark := rec[recordHeaderLen : recordHeaderLen+hmacLen]
+		h := c.hmacRead
+		if c.residual != nil {
+			h = h.clone() // 可能是残帧,先别动正式的 HMAC 状态
+		}
+		h.write(data)
+		sum := h.sum4()
+		if !bytes.Equal(sum[:], mark) {
+			if c.residual != nil {
+				r := c.residual.clone()
+				r.write(data)
+				if sum := r.sum4(); bytes.Equal(sum[:], mark) {
+					c.residual = r
+					continue
+				}
+			}
 			c.fail()
 			return 0, errors.New("shadowtls: bad record mac")
 		}
+		h.write(sum[:])
+		c.hmacRead, c.residual = h, nil
 		c.pending = data
 	}
 	n := copy(p, c.pending)
@@ -347,7 +365,7 @@ func (c *serverConn) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (c *serverConn) Write(p []byte) (int, error) {
+func (c *dataConn) Write(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	written := 0
@@ -373,7 +391,7 @@ func (c *serverConn) Write(p []byte) (int, error) {
 }
 
 // fail 数据校验失败:TLS 1.2 时按协议回 Alert(内容随机),然后由调用方关闭连接。
-func (c *serverConn) fail() {
+func (c *dataConn) fail() {
 	if !c.alertOnFail {
 		return
 	}
