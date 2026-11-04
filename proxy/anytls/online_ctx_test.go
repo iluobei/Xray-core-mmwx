@@ -55,7 +55,8 @@ func TestOnlineMapClearsOnStreamClose(t *testing.T) {
 		Source: net.TCPDestination(net.ParseAddress("203.0.113.9"), 12345),
 	})
 
-	if err := s.handleNewStream(ctx, st, synBody(t, "1.1.1.1:443")); err != nil {
+	br, n := synBody(t, "1.1.1.1:443")
+	if err := s.handleNewStream(ctx, st, br, n); err != nil {
 		t.Fatalf("handleNewStream: %v", err)
 	}
 	if got := om.Count(); got != 1 {
@@ -122,13 +123,13 @@ func newTestServerSession(disp routing.Dispatcher) *session {
 	return s
 }
 
-func synBody(t *testing.T, dest string) *buf.BufferedReader {
+func synBody(t *testing.T, dest string) (*buf.BufferedReader, int) {
 	t.Helper()
 	var b bytes.Buffer
 	if err := M.SocksaddrSerializer.WriteAddrPort(&b, M.ParseSocksaddr(dest)); err != nil {
 		t.Fatalf("encode dest: %v", err)
 	}
-	return &buf.BufferedReader{Reader: buf.NewReader(bytes.NewReader(b.Bytes()))}
+	return &buf.BufferedReader{Reader: buf.NewReader(bytes.NewReader(b.Bytes()))}, b.Len()
 }
 
 // #731:anytls 每条流必须用「随流关闭而取消」的 dispatch ctx,否则在线 IP 直到整个会话
@@ -141,7 +142,8 @@ func TestStreamCtxCancelledOnFinishStream(t *testing.T) {
 	st := &stream{sid: 1}
 	s.streams[1] = st
 
-	if err := s.handleNewStream(context.Background(), st, synBody(t, "1.1.1.1:443")); err != nil {
+	br, n := synBody(t, "1.1.1.1:443")
+	if err := s.handleNewStream(context.Background(), st, br, n); err != nil {
 		t.Fatalf("handleNewStream: %v", err)
 	}
 	if disp.ctx == nil {
@@ -172,7 +174,8 @@ func TestStreamCtxCancelledWhenDownlinkEnds(t *testing.T) {
 	st := &stream{sid: 7}
 	s.streams[7] = st
 
-	if err := s.handleNewStream(context.Background(), st, synBody(t, "2.2.2.2:8443")); err != nil {
+	br, n := synBody(t, "2.2.2.2:8443")
+	if err := s.handleNewStream(context.Background(), st, br, n); err != nil {
 		t.Fatalf("handleNewStream: %v", err)
 	}
 

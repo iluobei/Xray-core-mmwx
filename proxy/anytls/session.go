@@ -1,6 +1,7 @@
 package anytls
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/binary"
@@ -122,10 +123,34 @@ func streamContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithCancel(sessionctx.SubContextFromMuxInbound(ctx))
 }
 
-func (s *session) handleNewStream(ctx context.Context, st *stream, br *buf.BufferedReader) error {
-	addr, err := M.SocksaddrSerializer.ReadAddrPort(br)
+// handleNewStream 处理一条新流的第一个 PSH 帧:帧体开头是目标地址,地址后面可以紧跟这条流的头一段数据。
+//
+// 协议允许客户端把目标地址和首包合在一帧发(参考实现 sing-anytls 是从流里读出地址、剩下的照常当数据)。
+// 从前这里只从会话读缓冲里读出地址、不管帧长,同一帧里多出来的字节被当成下一帧的帧头去解析,整条会话错帧;
+// sing-box / mihomo 的客户端恰好分帧发所以没暴露,Surge 把「地址 + UoT 请求 + 第一个 UDP 包」合在一帧,
+// UDP 收不到任何回应(NAT 测试 Blocked)。现在按帧长整帧读出,地址之后的字节进这条流的上行队列。
+func (s *session) handleNewStream(ctx context.Context, st *stream, br *buf.BufferedReader, length int) error {
+	body, err := readMultiBufferExact(br, length)
+	if err != nil {
+		buf.ReleaseMulti(body)
+		return err
+	}
+	frameData := make([]byte, body.Len())
+	body, n := buf.SplitBytes(body, frameData)
+	buf.ReleaseMulti(body)
+	frameData = frameData[:n]
+	rd := bytes.NewReader(frameData)
+	addr, err := M.SocksaddrSerializer.ReadAddrPort(rd)
 	if err != nil {
 		return err
+	}
+	// rest 是同一帧里地址后面的数据(多数客户端分帧发,为空)
+	rest := frameData[len(frameData)-rd.Len():]
+	pushRest := func() {
+		if len(rest) > 0 && st.up != nil {
+			// 队列已中止(流在别处结束)时 push 自己释放,丢掉即可
+			_ = st.up.push(buf.MergeBytes(nil, rest))
+		}
 	}
 	dest := singbridge.ToDestination(addr, net.Network_TCP)
 	if dest.Address == nil {
@@ -148,6 +173,10 @@ func (s *session) handleNewStream(ctx context.Context, st *stream, br *buf.Buffe
 			st.cancel = cancel
 			// 先起消费方再发 SYNACK:SYNACK 发送失败时 readLoop 并不退出,没人取的队列满了会把它永远卡住。
 			go s.handleUDPStream(sctx, st)
+			pushRest()
+		} else if len(rest) > 0 {
+			// fork 自身客户端的 raw 路径从下一帧读 UoT 请求,它也从不合帧发;真遇到了只能丢掉
+			errors.LogWarning(ctx, "anytls: dropped ", len(rest), " bytes after UoT address in first frame, streamId=", st.sid)
 		}
 		if err := s.sendFrame(newFrame(cmdSYNACK, st.sid)); err != nil {
 			errors.LogWarning(ctx, "anytls: UDP SYNACK send error, streamId=", st.sid, " err=", err)
@@ -171,6 +200,7 @@ func (s *session) handleNewStream(ctx context.Context, st *stream, br *buf.Buffe
 	// 同 UoT:写 goroutine 必须在发 SYNACK 之前起好。
 	st.up = newUplinkQueue()
 	go s.writeUplink(st)
+	pushRest()
 
 	if err := s.sendFrame(newFrame(cmdSYNACK, st.sid)); err != nil {
 		errors.LogWarning(ctx, "anytls: new stream SYNACK send error, streamId=", st.sid, " err=", err)
@@ -528,7 +558,9 @@ func (s *session) readLoop(ctx context.Context) error {
 				}
 				continue
 			} else if st.link == nil {
-				s.handleNewStream(ctx, st, s.br)
+				if err := s.handleNewStream(ctx, st, s.br, length); err != nil {
+					return err
+				}
 				continue
 			}
 			readErr, writeErr := s.handlePSH(ctx, st, s.br, length)
