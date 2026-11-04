@@ -97,7 +97,24 @@ type snellStream struct {
 
 func (s *snellStream) Close() { _ = s.conn.Close() }
 
-// dialSnell 完整走一遍客户端流程:salt + 首个 record 里带 CONNECT 请求 → 读回程 ReplyTunnel。
+// replyReader 在第一次读的时候先读掉 ReplyTunnel。服务端要等出站交出第一批数据才回应答,
+// 所以客户端不能发完请求就干等它 —— 得像真实客户端那样先把数据发出去。
+type replyReader struct {
+	r       io.Reader
+	replied bool
+}
+
+func (r *replyReader) Read(p []byte) (int, error) {
+	if !r.replied {
+		if err := readServerReply(r.r); err != nil {
+			return 0, err
+		}
+		r.replied = true
+	}
+	return r.r.Read(p)
+}
+
+// dialSnell 走客户端流程:salt + 首个 record 里带 CONNECT 请求;ReplyTunnel 留到第一次读回程时再读。
 func dialSnell(addr, psk string) (*snellStream, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -117,12 +134,8 @@ func dialSnell(addr, psk string) (*snellStream, error) {
 		return nil, err
 	}
 	rr := newRecordReader(conn, []byte(psk))
-	if err := readServerReply(rr); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
 	_ = conn.SetDeadline(time.Time{})
-	return &snellStream{conn: conn, w: w, r: bufio.NewReader(rr)}, nil
+	return &snellStream{conn: conn, w: w, r: bufio.NewReader(&replyReader{r: rr})}, nil
 }
 
 // probeSnell 用某个凭据完整连一次并回显一帧。返回 nil 即「这个用户此刻真的能用」。
@@ -516,12 +529,8 @@ func dialSnellV6(addr, psk string) (*snellStream, error) {
 		return nil, err
 	}
 	rr := newV6Reader(conn, ModeDefault, []byte(psk), profile)
-	if err := readServerReply(rr); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
 	_ = conn.SetDeadline(time.Time{})
-	return &snellStream{conn: conn, w: w, r: bufio.NewReader(rr)}, nil
+	return &snellStream{conn: conn, w: w, r: bufio.NewReader(&replyReader{r: rr})}, nil
 }
 
 func probeSnellV6(addr, psk string) error {
@@ -545,13 +554,10 @@ func probeSnellV6(addr, psk string) error {
 		return err
 	}
 	rr := newV6Reader(conn, ModeDefault, []byte(psk), profile)
-	if err := readServerReply(rr); err != nil {
-		return err
-	}
 	if _, err := w.Write([]byte("probe\n")); err != nil {
 		return err
 	}
-	line, err := bufio.NewReader(rr).ReadString('\n')
+	line, err := bufio.NewReader(&replyReader{r: rr}).ReadString('\n')
 	if err != nil {
 		return err
 	}

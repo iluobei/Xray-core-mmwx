@@ -139,6 +139,7 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 	timer := signal.CancelAfterInactivity(ctx, cancel, sessPolicy.Timeouts.ConnectionIdle)
 
 	requestDone := func() error {
+		defer timer.SetTimeout(sessPolicy.Timeouts.DownlinkOnly)
 		if err := buf.Copy(link.Reader, buf.NewWriter(writer), buf.UpdateActivity(timer)); err != nil {
 			return errors.New("snell: transport request").Base(err)
 		}
@@ -149,6 +150,9 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 		return nil
 	}
 	responseDone := func() error {
+		// 下行结束(server 的结束 record)之后,本地应用不关连接的话最多再等 UplinkOnly。
+		// 入站用 DispatchLink 直连出站时(如 socks),应用侧何时看到 EOF 全看这里何时返回。
+		defer timer.SetTimeout(sessPolicy.Timeouts.UplinkOnly)
 		// 先读掉 server 回程首字节(ReplyTunnel/Error),其余才是应用数据。
 		if err := readServerReply(reader); err != nil {
 			return errors.New("snell: read reply").Base(err)

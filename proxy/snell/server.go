@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	goerrors "errors"
 	"io"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -18,7 +20,6 @@ import (
 	udp_proto "github.com/xtls/xray-core/common/protocol/udp"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal"
-	"github.com/xtls/xray-core/common/task"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/features/routing"
@@ -149,7 +150,7 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 
 	s.setInbound(ctx, user)
 	writer := newRecordWriter(oconn, account.PSK)
-	return s.serve(ctx, req, reader, writer, dispatcher, sessPolicy)
+	return s.serve(ctx, conn, user, req, reader, writer, dispatcher, sessPolicy)
 }
 
 // processV6:逐 PSK 试解首个 record 定位用户(default/unshaped),再按该用户各自的 PSK 建 reader/writer。
@@ -180,7 +181,7 @@ func (s *Server) processV6(ctx context.Context, conn stat.Connection, dispatcher
 	if err != nil {
 		return errors.New("snell v6: create writer").Base(err)
 	}
-	return s.serve(ctx, req, reader, writer, dispatcher, sessPolicy)
+	return s.serve(ctx, conn, user, req, reader, writer, dispatcher, sessPolicy)
 }
 
 // identifyV6User 逐 PSK 试解首个 record 的 header(AEAD tag 即认证)定位用户。返回:命中用户、
@@ -302,54 +303,286 @@ func (s *Server) setInbound(ctx context.Context, user *protocol.MemoryUser) {
 	inbound.CanSpliceCopy = 3
 }
 
+// drainLimit 是「下行已结束、等客户端的结束 record」期间最多读掉丢弃多少字节。客户端等服务端的
+// 结束 record 时也有同量级的上限(Surge / sing-snell 是 0x80001),超过就不再陪它耗,直接断开。
+const drainLimit = 0x80000
+
 // serve 按 command 分 TCP/UDP。reader/writer 已按版本建好,以下逻辑版本无关。
-// CommandConnect(0x01)与 ConnectV2(0x05)首个响应格式相同,均按非复用 TCP 处理。
-func (s *Server) serve(ctx context.Context, req request, reader snellReader, writer snellWriter, dispatcher routing.Dispatcher, sessPolicy policy.Session) error {
-	switch req.command {
-	case commandConnect, commandConnectV2:
-		return s.serveTCP(ctx, req.destination, reader, writer, dispatcher, sessPolicy)
-	case commandUDP:
-		return s.handleUDP(ctx, reader, writer, dispatcher, sessPolicy)
-	default:
-		return errors.New("snell: unsupported command ", req.command)
+//
+// CommandConnect(0x01)一条连接只跑一条流。ConnectV2(0x05)的连接可复用:一条流的两个方向各自以
+// 零长度 record 结束之后,客户端可以在同一条连接上接着发下一个请求 —— 加密状态沿用(不重新握手、
+// 不重发 salt),服务端对每个请求各回一次应答。
+func (s *Server) serve(ctx context.Context, conn stat.Connection, user *protocol.MemoryUser, req request, reader snellReader, writer snellWriter, dispatcher routing.Dispatcher, sessPolicy policy.Session) error {
+	for {
+		switch req.command {
+		case commandConnect, commandConnectV2:
+			reusable, err := s.serveTCP(ctx, conn, req, reader, writer, dispatcher, sessPolicy)
+			if err != nil || !reusable {
+				return err
+			}
+		case commandUDP:
+			return s.handleUDP(ctx, reader, writer, dispatcher, sessPolicy)
+		default:
+			return errors.New("snell: unsupported command ", req.command)
+		}
+
+		// 上一条流两个方向都正常结束了,等客户端在这条连接上发下一个请求。空闲多久算到头用
+		// ConnectionIdle:客户端的连接池最多把一条空闲连接留 180 秒(sing-snell;mihomo 是 15 秒),
+		// 默认的 300 秒够它先放手。服务端先关的话,sing-snell 的池里会留下一条死连接,它的下一个
+		// 请求就得失败一次 —— 所以别把 connIdle 调到 180 秒以下。
+		_ = conn.SetReadDeadline(time.Now().Add(sessPolicy.Timeouts.ConnectionIdle))
+		var err error
+		if req, err = readRequest(reader); err != nil {
+			if err == io.EOF || goerrors.Is(err, os.ErrDeadlineExceeded) {
+				return nil // 客户端关了连接,或者空闲到点
+			}
+			return errors.New("snell: read next request").Base(err)
+		}
+		_ = conn.SetReadDeadline(time.Time{})
+
+		// 后续请求不再握手,用户是这条连接建立时认下的。不查这一步的话,被删掉的用户只要连接池
+		// 不空就能一直用下去 —— 没有复用的时候,它的下一个请求必然要重新握手、当场被拒。
+		if !s.hasUser(user) {
+			return errors.New("snell: user ", user.Email, " is gone, closing reused connection")
+		}
 	}
 }
 
-func (s *Server) serveTCP(ctx context.Context, destination xnet.Destination, reader snellReader, writer snellWriter, dispatcher routing.Dispatcher, sessPolicy policy.Session) error {
-	ctx = accessLogCtx(ctx, destination)
-	link, err := dispatcher.Dispatch(ctx, destination)
+// hasUser 报告 user 是否还在用户表里(按指针:删掉重加的同名用户算另一个人,它的 PSK 可能已经换了)。
+func (s *Server) hasUser(user *protocol.MemoryUser) bool {
+	for _, u := range s.snapshotUsers() {
+		if u == user {
+			return true
+		}
+	}
+	return false
+}
+
+// streamContext 给一条流准备它自己的 ctx。Outbound / Content 是分发器按「一条流」写的状态(目标、
+// 嗅探到的协议与域名、RouteTarget……),worker 只在连接建立时各给了一份;复用连接上先后要跑多条流,
+// 共用同一份的话,上一个请求嗅探出的结果会漏给下一个请求的路由。
+func streamContext(ctx context.Context, dest xnet.Destination) context.Context {
+	ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{}})
+	if content := session.ContentFromContext(ctx); content != nil {
+		ctx = session.ContextWithContent(ctx, &session.Content{SniffingRequest: content.SniffingRequest})
+	}
+	return accessLogCtx(ctx, dest)
+}
+
+// 出站在交出任何数据之前就失败(连不上、解析不了、被路由拒掉)时回给客户端的 ReplyError:
+// 0x02 | code | 文案长度 | 文案。具体原因只进服务端日志,入站这里只知道「没成」;code 取 0xff ——
+// 参考实现记下的官方服务端行为里,网络层的错误走的也是它。
+const (
+	replyErrorCode    = 0xff
+	replyErrorMessage = "connection failed"
+)
+
+// replyWriter 是一条流的下行写端。应答(ReplyTunnel)等到出站交出第一批数据才回,和这批数据放进
+// 同一个 record(官方服务端也是这样):在那之前出站还可能失败,那时该回的是 ReplyError,而不是先说
+// 隧道通了、再把连接关掉 —— 后者会让分不清「TCP 被关」与「结束 record」的客户端把死连接放回池里。
+type replyWriter struct {
+	writer  snellWriter
+	rest    buf.Writer
+	replied bool
+}
+
+func (w *replyWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	if w.replied {
+		return w.rest.WriteMultiBuffer(mb)
+	}
+	w.replied = true
+	first := make([]byte, 1, 1+mb.Len())
+	first[0] = replyTunnel
+	for _, b := range mb {
+		first = append(first, b.Bytes()...)
+	}
+	buf.ReleaseMulti(mb)
+	_, err := w.writer.Write(first)
+	return err
+}
+
+// serveTCP 转发一条 TCP 流。返回 true 表示这条流的两个方向都已按协议结束(零长度 record 一收一发),
+// 连接上可以接着读下一个请求;只有 ConnectV2 的流才会返回 true。
+//
+// 上行、下行各一个 goroutine 只管搬数据,怎么收场由这里统一决定 —— 往客户端写结束 record / 错误应答
+// 都等下行 goroutine 退出之后才做,不会有两处同时写。
+func (s *Server) serveTCP(ctx context.Context, conn stat.Connection, req request, reader snellReader, writer snellWriter, dispatcher routing.Dispatcher, sessPolicy policy.Session) (bool, error) {
+	reuse := req.command == commandConnectV2
+
+	// 这条流自己的 ctx,流结束就 cancel:出站那一侧、在线 IP 记账都挂在分发用的 ctx 上,连接不复用时
+	// 它们随连接一起收场;复用之后连接还要活很久,得按流收。
+	ctx, cancel := context.WithCancel(streamContext(ctx, req.destination))
+	defer cancel()
+
+	link, err := dispatcher.Dispatch(ctx, req.destination)
 	if err != nil {
-		return errors.New("snell: dispatch").Base(err)
+		return false, errors.New("snell: dispatch").Base(err)
 	}
-
-	// 回程首字节必须是 ReplyTunnel(0x00),客户端据此确认隧道建立。
-	if _, err := writer.Write([]byte{replyTunnel}); err != nil {
-		return errors.New("snell: write tunnel reply").Base(err)
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	timer := signal.CancelAfterInactivity(ctx, cancel, sessPolicy.Timeouts.ConnectionIdle)
-
-	requestDone := func() error {
-		if err := buf.Copy(buf.NewReader(reader), link.Writer, buf.UpdateActivity(timer)); err != nil {
-			return errors.New("snell: transport request").Base(err)
-		}
-		return nil
-	}
-	responseDone := func() error {
-		if err := buf.Copy(link.Reader, buf.NewWriter(writer), buf.UpdateActivity(timer)); err != nil {
-			return errors.New("snell: transport response").Base(err)
-		}
-		return nil
-	}
-
-	requestDoneAndCloseWriter := task.OnSuccess(requestDone, task.Close(link.Writer))
-	if err := task.Run(ctx, requestDoneAndCloseWriter, responseDone); err != nil {
+	abort := func(err error) (bool, error) {
 		common.Interrupt(link.Reader)
 		common.Interrupt(link.Writer)
-		return errors.New("snell: connection ends").Base(err)
+		return false, errors.New("snell: connection ends").Base(err)
 	}
-	return nil
+
+	timer := signal.CancelAfterInactivity(ctx, cancel, sessPolicy.Timeouts.ConnectionIdle)
+	defer timer.SetTimeout(0)
+
+	// 两个结果都是 buf.Copy 的原始返回值:nil = 这个方向正常结束(上行:读到客户端的结束 record;
+	// 下行:目标 EOF)。先交结果、再缩短定时器,这样定时器到点时结果一定已经在 channel 里。
+	uplink := make(chan error, 1)
+	downlink := make(chan error, 1)
+	response := &replyWriter{writer: writer, rest: buf.NewWriter(writer)}
+	go func() {
+		err := buf.Copy(buf.NewReader(reader), link.Writer, buf.UpdateActivity(timer))
+		if err == nil {
+			common.Close(link.Writer)
+		}
+		uplink <- err
+		timer.SetTimeout(sessPolicy.Timeouts.DownlinkOnly)
+	}()
+	go func() {
+		err := buf.Copy(link.Reader, response, buf.UpdateActivity(timer))
+		downlink <- err
+		timer.SetTimeout(sessPolicy.Timeouts.UplinkOnly)
+	}()
+
+	// 等下行结束。
+	var uplinkErr, downlinkErr error
+	uplinkExited, timedOut := false, false
+	for waiting := true; waiting; {
+		select {
+		case uplinkErr = <-uplink:
+			uplinkExited = true
+			if uplinkErr != nil && !buf.IsWriteError(uplinkErr) {
+				return abort(uplinkErr) // 客户端这头读不下去了
+			}
+		case downlinkErr = <-downlink:
+			waiting = false
+		case <-ctx.Done():
+			// 定时器到点:放掉 link 让下行 goroutine 退出;它要是正卡在往客户端写,让那次写立刻失败。
+			timedOut = true
+			common.Interrupt(link.Reader)
+			common.Interrupt(link.Writer)
+			_ = conn.SetWriteDeadline(time.Now())
+			downlinkErr = <-downlink
+			_ = conn.SetWriteDeadline(time.Time{})
+			waiting = false
+		}
+	}
+	if !uplinkExited {
+		select {
+		case uplinkErr = <-uplink:
+			uplinkExited = true
+		default:
+		}
+	}
+	clientEnded := uplinkExited && uplinkErr == nil
+
+	switch {
+	case downlinkErr == nil:
+		// 目标 EOF。
+	case timedOut && clientEnded && buf.IsReadError(downlinkErr):
+		// 客户端已经结束,目标在 DownlinkOnly 之内再没有动静 —— xray 不把半关闭传给目标,「客户端先关、
+		// 目标还开着」的流都是这样收场的,算正常结束。这时关 TCP 的话,正等着结束 record 的客户端
+		// 分不清两者,会把死连接放回池里。
+	default:
+		// 出站那边失败了,或者这条流整个空闲到点。还没回过应答、又确实是出站没成,就把话说明白;
+		// 别的情况只断开,不能让客户端把截断的响应当成完整的。
+		if !response.replied && !timedOut {
+			_, _ = writer.Write(append([]byte{replyError, replyErrorCode, byte(len(replyErrorMessage))}, replyErrorMessage...))
+		}
+		return abort(downlinkErr)
+	}
+
+	// 下行正常结束:发零长度 record,客户端才知道到此为止。不发的话,靠「连接关闭」表示响应结束的
+	// 流量(HTTP/1.0、不带 Content-Length 的 Connection: close、whois……)会一直挂到某一头超时。
+	// 目标一个字节没发就结束的,应答在这里补上。
+	if !response.replied {
+		if _, err := writer.Write([]byte{replyTunnel}); err != nil {
+			return abort(err)
+		}
+	}
+	if err := writer.writeZeroChunk(); err != nil {
+		return abort(err)
+	}
+
+	// 半关闭:下行结束了,客户端这一半还可以接着发,最多等它 UplinkOnly(定时器在下行结束时已经缩短)。
+	if !uplinkExited {
+		select {
+		case uplinkErr = <-uplink:
+			uplinkExited = true
+		case <-ctx.Done():
+		}
+	}
+	if uplinkExited && uplinkErr == nil {
+		return reuse, nil
+	}
+	common.Interrupt(link.Reader)
+	common.Interrupt(link.Writer)
+	if !reuse {
+		return false, nil
+	}
+
+	// 可复用的连接,只是客户端那一半迟迟不结束(UplinkOnly 到点),或者它在出站收场之后还在发数据。
+	// 这条流在我们这边到此为止(link 已经放掉),但连接不能关:客户端读到了结束 record,会把这条连接
+	// 当成可复用的放回池里,关掉等于给它留一条死连接。所以只把它后面发来的数据读掉丢弃,等到它的
+	// 结束 record 为止。
+	cancel()
+	_ = conn.SetReadDeadline(time.Now().Add(sessPolicy.Timeouts.ConnectionIdle))
+	if !uplinkExited {
+		uplinkErr = <-uplink
+	}
+	if uplinkErr == nil {
+		return true, nil
+	} else if !buf.IsWriteError(uplinkErr) {
+		return false, errors.New("snell: drain request").Base(uplinkErr)
+	}
+	for discarded := 0; discarded < drainLimit; {
+		record, err := reader.nextRecord()
+		if err == io.EOF {
+			return true, nil
+		}
+		if err != nil {
+			return false, errors.New("snell: drain request").Base(err)
+		}
+		discarded += len(record)
+	}
+	return false, errors.New("snell: too much data after response ended")
+}
+
+// udpSources 把域名形式的回包来源换成 IP。snell 的回包地址只有 IPv4 / IPv6 两种写法,而出站
+// (freedom)会把「会话第一个目标」的来源还原成当初拨号用的地址 —— 那个目标是域名的话,回包来源
+// 就是域名,原样拿去编码只会失败。真实的对端 IP 出站没有交出来,这里只能自己再解析一次;每个域名
+// 只解析一次并记住(失败也记),同一个会话里它的回包来源不会变来变去。
+type udpSources struct {
+	sync.Mutex
+	ips map[string]xnet.Address // nil = 解析失败
+}
+
+func (s *udpSources) resolve(source xnet.Destination) (xnet.Destination, error) {
+	if !source.Address.Family().IsDomain() {
+		return source, nil
+	}
+	domain := source.Address.Domain()
+
+	s.Lock()
+	defer s.Unlock()
+	ip, ok := s.ips[domain]
+	if !ok {
+		// freedom 不配 domainStrategy 时,拨号走的也是这个解析入口。
+		if addr, err := xnet.ResolveUDPAddr("udp", source.NetAddr()); err == nil {
+			ip = xnet.IPAddress(addr.IP)
+		}
+		if s.ips == nil {
+			s.ips = make(map[string]xnet.Address)
+		}
+		s.ips[domain] = ip
+	}
+	if ip == nil {
+		return source, errors.New("snell: udp response source ", domain, " has no ip")
+	}
+	source.Address = ip
+	return source, nil
 }
 
 // handleUDP 处理 CommandUDP:每个 record = 一个数据报(client→server: 0x01|地址|payload)。
@@ -366,12 +599,20 @@ func (s *Server) handleUDP(ctx context.Context, reader snellReader, writer snell
 	timer := signal.CancelAfterInactivity(ctx, cancel, sessPolicy.Timeouts.ConnectionIdle)
 	defer timer.SetTimeout(0)
 
+	var sources udpSources
 	udpServer := udp.NewDispatcher(dispatcher, func(ctx context.Context, packet *udp_proto.Packet) {
 		payload := packet.Payload
 		if payload == nil {
 			return
 		}
-		if err := packetWriter.writePacket(payload.Bytes(), packet.Source); err != nil {
+		source, err := sources.resolve(packet.Source)
+		if err != nil {
+			// 只丢这一个回包:会话里还有别的目标在收发。
+			errors.LogInfoInner(ctx, err, "snell: drop udp response from ", packet.Source)
+			payload.Release()
+			return
+		}
+		if err := packetWriter.writePacket(payload.Bytes(), source); err != nil {
 			errors.LogWarningInner(ctx, err, "snell: write udp response")
 			payload.Release()
 			cancel()
@@ -408,6 +649,9 @@ func (s *Server) handleUDP(ctx context.Context, reader snellReader, writer snell
 			b.Release()
 			return err
 		}
+		// 每个数据报带着它自己的目标(full-cone)。不带的话,出站会把整条会话的数据报都发往
+		// 建链时的那个目标,也就是第一个数据报的目标。
+		b.UDP = &dest
 		// 逐包挂日志:UDP 一条隧道会打到很多目标,不能共用一条 AccessMessage。
 		udpServer.Dispatch(accessLogCtx(ctx, dest), dest, b)
 	}
