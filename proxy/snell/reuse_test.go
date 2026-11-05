@@ -711,7 +711,14 @@ func TestSnellReplyErrorWhenTargetFails(t *testing.T) {
 				if string(record) != want {
 					t.Fatalf("应当收到 ReplyError %q, 得到 %q", want, record)
 				}
-				c.expectClosed(2 * time.Second)
+				// 必须是 FIN 而不是 RST:客户端发来的首包服务端没读,直接关会变成 RST,Windows 客户端
+				// 收到 RST 会把还没读的错误应答一起丢掉。
+				c.send("more\n")
+				_ = c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				var b [1]byte
+				if n, err := c.conn.Read(b[:]); n != 0 || err != io.EOF {
+					t.Fatalf("错误应答之后应当读到 EOF(服务端半关闭),得到 n=%d err=%v", n, err)
+				}
 			})
 		}
 	}

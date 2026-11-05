@@ -399,6 +399,32 @@ const (
 	replyErrorMessage = "connection failed"
 )
 
+// replyErrorLinger 是回完 ReplyError 之后最多等客户端关连接多久。
+const replyErrorLinger = 2 * time.Second
+
+// closeAfterReplyError 在回完 ReplyError、关连接之前调用:先半关闭写端(客户端读完错误应答立刻读到
+// EOF),再把客户端已经发来、我们没读的数据读掉,等它先关。直接关的话,收缓冲里还剩没读的数据(请求
+// 后面跟着的首包)会让内核发 RST 而不是 FIN;Windows 客户端收到 RST 会把还没读的 ReplyError 一起丢掉,
+// 只看到「连接被重置」。
+func closeAfterReplyError(conn stat.Connection, uplink <-chan error, uplinkExited bool) {
+	if cw, ok := stat.TryUnwrapStatsConn(conn).(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(replyErrorLinger))
+	// 上行 goroutine 还在读的话,等它读到 EOF / 到点 / 往已放掉的 link 写失败后退出,不和它抢着读。
+	if !uplinkExited {
+		<-uplink
+	}
+	var b [4096]byte
+	for discarded := 0; discarded < drainLimit; {
+		n, err := conn.Read(b[:])
+		if err != nil {
+			return
+		}
+		discarded += n
+	}
+}
+
 // replyWriter 是一条流的下行写端。应答(ReplyTunnel)等到出站交出第一批数据才回,和这批数据放进
 // 同一个 record(官方服务端也是这样):在那之前出站还可能失败,那时该回的是 ReplyError,而不是先说
 // 隧道通了、再把连接关掉 —— 后者会让分不清「TCP 被关」与「结束 record」的客户端把死连接放回池里。
@@ -511,7 +537,11 @@ func (s *Server) serveTCP(ctx context.Context, conn stat.Connection, req request
 		// 出站那边失败了,或者这条流整个空闲到点。还没回过应答、又确实是出站没成,就把话说明白;
 		// 别的情况只断开,不能让客户端把截断的响应当成完整的。
 		if !response.replied && !timedOut {
-			_, _ = writer.Write(append([]byte{replyError, replyErrorCode, byte(len(replyErrorMessage))}, replyErrorMessage...))
+			if _, err := writer.Write(append([]byte{replyError, replyErrorCode, byte(len(replyErrorMessage))}, replyErrorMessage...)); err == nil {
+				reusable, err := abort(downlinkErr)
+				closeAfterReplyError(conn, uplink, uplinkExited)
+				return reusable, err
+			}
 		}
 		return abort(downlinkErr)
 	}
