@@ -109,6 +109,7 @@ func (s *session) handleUDPStream(ctx context.Context, st *stream) {
 // udpDownlink 从 freedom link 读回 UDP 包,逐包封成 UoT 帧发回客户端:
 // not-connected 每包带源地址前缀 [src addr][uint16 len][payload];connected 只 [uint16 len][payload]。
 func (s *session) udpDownlink(st *stream, link *transport.Link) {
+	var sources udpSources
 	for {
 		mb, err := link.Reader.ReadMultiBuffer()
 		if err != nil {
@@ -120,6 +121,13 @@ func (s *session) udpDownlink(st *stream, link *transport.Link) {
 				src := st.uotDest
 				if b.UDP != nil {
 					src = *b.UDP
+				}
+				src, ok := sources.resolve(src)
+				if !ok {
+					// 域名解析不了:只丢这一个包,会话照常(同 snell)。
+					header.Release()
+					b.Release()
+					continue
 				}
 				if werr := uot.AddrParser.WriteAddrPort(header, singbridge.ToSocksaddr(src)); werr != nil {
 					header.Release()
@@ -135,4 +143,36 @@ func (s *session) udpDownlink(st *stream, link *transport.Link) {
 			}
 		}
 	}
+}
+
+// udpSources 把回包的域名来源换成 IP。freedom 会把「会话第一个目标」的回包来源还原成当初拨号用的
+// 地址,那个目标是域名时来源就是域名。UoT 虽然编得了域名,但 Surge 这类客户端按 IP 认来源,对不上
+// 直接丢包 —— 以域名发 STUN 的 NAT 测试一个回应都收不到,显示 Blocked(#1677)。真实对端 IP 出站
+// 没有交出来,只能再解析一次;每个域名只解析一次并记住(失败也记),同一条流里它的回包来源不会变来变去。
+// 只在这条流的下行 goroutine 里用,不用加锁。
+type udpSources struct {
+	ips map[string]net.Address // nil = 解析失败
+}
+
+func (s *udpSources) resolve(source net.Destination) (net.Destination, bool) {
+	if !source.Address.Family().IsDomain() {
+		return source, true
+	}
+	domain := source.Address.Domain()
+	ip, ok := s.ips[domain]
+	if !ok {
+		// freedom 不配 domainStrategy 时,拨号走的也是这个解析入口。
+		if addr, err := net.ResolveUDPAddr("udp", source.NetAddr()); err == nil {
+			ip = net.IPAddress(addr.IP)
+		}
+		if s.ips == nil {
+			s.ips = make(map[string]net.Address)
+		}
+		s.ips[domain] = ip
+	}
+	if ip == nil {
+		return source, false
+	}
+	source.Address = ip
+	return source, true
 }

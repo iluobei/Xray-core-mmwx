@@ -177,3 +177,34 @@ func TestUDPFullconeDownlinkFraming(t *testing.T) {
 		t.Errorf("payload = %q, want reply-a", string(payload))
 	}
 }
+
+// 会话第一个目标是域名时,freedom 交回的回包来源也是域名;封回给客户端前要换成 IP,
+// 否则 Surge 这类按 IP 认来源的客户端会把回包丢掉(#1677:以域名发 STUN 的 NAT 测试显示 Blocked)。
+func TestUDPFullconeDownlinkDomainSourceBecomesIP(t *testing.T) {
+	var out bytes.Buffer
+	s := &session{}
+	s.bw = buf.NewBufferedWriter(buf.NewWriter(&out))
+	s.fw = newFrameWriter(s.bw)
+
+	dest := net.UDPDestination(net.ParseAddress("localhost"), 3478)
+	st := &stream{sid: 9, uotConnected: false, uotDest: dest}
+	link := &transport.Link{Reader: &oneShotUDPReader{src: dest, payload: "stun-reply"}}
+
+	s.udpDownlink(st, link)
+
+	raw := out.Bytes()
+	if len(raw) < 7 {
+		t.Fatalf("frame too short: %d bytes", len(raw))
+	}
+	body := raw[7 : 7+int(binary.BigEndian.Uint16(raw[5:7]))]
+	addr, err := uot.AddrParser.ReadAddrPort(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("parse src addr: %v", err)
+	}
+	if addr.IsFqdn() {
+		t.Fatalf("回包来源仍是域名 %q,应换成 IP", addr.Fqdn)
+	}
+	if !addr.Addr.IsLoopback() || addr.Port != 3478 {
+		t.Fatalf("回包来源 = %s,应为 localhost 解析出的回环地址:3478", addr)
+	}
+}
