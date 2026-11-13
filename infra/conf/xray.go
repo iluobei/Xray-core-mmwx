@@ -42,6 +42,7 @@ var (
 		"anytls":        func() interface{} { return new(AnyTLSServerConfig) },
 		"snell":         func() interface{} { return new(SnellServerConfig) },
 		"mieru":         func() interface{} { return new(MieruServerConfig) },
+		"ssh":           func() interface{} { return new(SSHServerConfig) },
 	}, "protocol", "settings")
 
 	outboundConfigLoader = NewJSONConfigLoader(ConfigCreatorCache{

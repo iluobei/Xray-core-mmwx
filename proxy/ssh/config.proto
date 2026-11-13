@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package xray.proxy.ssh;
+option csharp_namespace = "Xray.Proxy.Ssh";
+option go_package = "github.com/xtls/xray-core/proxy/ssh";
+option java_package = "com.xray.proxy.ssh";
+option java_multiple_files = true;
+
+import "common/protocol/user.proto";
+
+// Account 是 SSH 入站的用户凭据:用户名 + 密码,和/或 authorized_keys 格式的公钥。
+// 密码与公钥至少要有一样;两样都配时任一通过即可(与 OpenSSH 默认一致)。
+message Account {
+  string username = 1;
+  string password = 2;
+  // authorized_keys 行,例如 "ssh-ed25519 AAAA... comment"。
+  repeated string authorized_keys = 3;
+}
+
+message ServerConfig {
+  repeated xray.common.protocol.User users = 1;
+  // 主机私钥(PEM,OpenSSH 或 PKCS#8 格式)。为空时启动时临时生成一把 ed25519,
+  // 重启即变 —— 客户端配了 host-key 校验就会连不上,只适合本地调试。
+  string host_key = 2;
+  // 握手时对外宣称的版本串,为空用内置的 OpenSSH 伪装串。
+  string server_version = 3;
+}

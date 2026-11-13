@@ -39,6 +39,7 @@ import (
 	_ "github.com/xtls/xray-core/proxy/blackhole"
 	_ "github.com/xtls/xray-core/proxy/snell"
 	_ "github.com/xtls/xray-core/proxy/mieru"
+	_ "github.com/xtls/xray-core/proxy/ssh"
 	_ "github.com/xtls/xray-core/proxy/dns"
 	_ "github.com/xtls/xray-core/proxy/dokodemo"
 	_ "github.com/xtls/xray-core/proxy/freedom"
