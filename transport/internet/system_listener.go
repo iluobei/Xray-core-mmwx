@@ -169,6 +169,10 @@ func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *S
 	l, err = callback(lc.Listen(ctx, network, address))
 	if err == nil {
 		if policyFunc, enabled := proxyProtocolPolicyFor(sockopt); enabled {
+			// 可信来源模式(转发链出口)下,里面再套一层查 TOA:没带 PROXY 头的连接用内核侧读到的真实客户端地址
+			if sockopt != nil && !sockopt.AcceptProxyProtocol {
+				l = wrapClientAddrListener(l, parseTrustedSources(sockopt.TrustedProxyProtocolSources))
+			}
 			l = &proxyproto.Listener{Listener: l, Policy: policyFunc}
 		}
 	}
