@@ -173,7 +173,12 @@ func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *S
 			if sockopt != nil && !sockopt.AcceptProxyProtocol {
 				l = wrapClientAddrListener(l, parseTrustedSources(sockopt.TrustedProxyProtocolSources))
 			}
-			l = &proxyproto.Listener{Listener: l, Policy: policyFunc}
+			pl := &proxyproto.Listener{Listener: l, Policy: policyFunc}
+			// 配了签名密钥:可信来源的头还要签名有效才采信,否则当成没头(按连接真实来源)
+			if v := proxyProtocolAuthFor(sockopt); v != nil {
+				pl.ValidateHeader = v
+			}
+			l = pl
 		}
 	}
 	return l, err

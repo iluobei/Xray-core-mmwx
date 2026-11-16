@@ -665,25 +665,31 @@ type SocketConfig struct {
 	// (宿主钩子,见 client_addr_hook.go),但所有来源的 PROXY 头一律读掉并忽略。
 	// 转发链入口走内核转发(TOA)时客户端发的字节原样到出口,客户端自己写的 PROXY 头也会跟着过来;
 	// 连接若恰好没带上 TOA,来源就是上一跳(可信),头就会被采信 —— 这种绑定的出口必须只认 TOA。
-	TrustedProxyProtocolToaOnly bool                 `protobuf:"varint,26,opt,name=trusted_proxy_protocol_toa_only,json=trustedProxyProtocolToaOnly,proto3" json:"trusted_proxy_protocol_toa_only,omitempty"`
-	DomainStrategy              DomainStrategy       `protobuf:"varint,8,opt,name=domain_strategy,json=domainStrategy,proto3,enum=xray.transport.internet.DomainStrategy" json:"domain_strategy,omitempty"`
-	DialerProxy                 string               `protobuf:"bytes,9,opt,name=dialer_proxy,json=dialerProxy,proto3" json:"dialer_proxy,omitempty"`
-	TcpKeepAliveInterval        int32                `protobuf:"varint,10,opt,name=tcp_keep_alive_interval,json=tcpKeepAliveInterval,proto3" json:"tcp_keep_alive_interval,omitempty"`
-	TcpKeepAliveIdle            int32                `protobuf:"varint,11,opt,name=tcp_keep_alive_idle,json=tcpKeepAliveIdle,proto3" json:"tcp_keep_alive_idle,omitempty"`
-	TcpCongestion               string               `protobuf:"bytes,12,opt,name=tcp_congestion,json=tcpCongestion,proto3" json:"tcp_congestion,omitempty"`
-	Interface                   string               `protobuf:"bytes,13,opt,name=interface,proto3" json:"interface,omitempty"`
-	V6Only                      bool                 `protobuf:"varint,14,opt,name=v6only,proto3" json:"v6only,omitempty"`
-	TcpWindowClamp              int32                `protobuf:"varint,15,opt,name=tcp_window_clamp,json=tcpWindowClamp,proto3" json:"tcp_window_clamp,omitempty"`
-	TcpUserTimeout              int32                `protobuf:"varint,16,opt,name=tcp_user_timeout,json=tcpUserTimeout,proto3" json:"tcp_user_timeout,omitempty"`
-	TcpMaxSeg                   int32                `protobuf:"varint,17,opt,name=tcp_max_seg,json=tcpMaxSeg,proto3" json:"tcp_max_seg,omitempty"`
-	Penetrate                   bool                 `protobuf:"varint,18,opt,name=penetrate,proto3" json:"penetrate,omitempty"`
-	TcpMptcp                    bool                 `protobuf:"varint,19,opt,name=tcp_mptcp,json=tcpMptcp,proto3" json:"tcp_mptcp,omitempty"`
-	CustomSockopt               []*CustomSockopt     `protobuf:"bytes,20,rep,name=customSockopt,proto3" json:"customSockopt,omitempty"`
-	AddressPortStrategy         AddressPortStrategy  `protobuf:"varint,21,opt,name=address_port_strategy,json=addressPortStrategy,proto3,enum=xray.transport.internet.AddressPortStrategy" json:"address_port_strategy,omitempty"`
-	HappyEyeballs               *HappyEyeballsConfig `protobuf:"bytes,22,opt,name=happy_eyeballs,json=happyEyeballs,proto3" json:"happy_eyeballs,omitempty"`
-	TrustedXForwardedFor        []string             `protobuf:"bytes,23,rep,name=trusted_x_forwarded_for,json=trustedXForwardedFor,proto3" json:"trusted_x_forwarded_for,omitempty"`
-	unknownFields               protoimpl.UnknownFields
-	sizeCache                   protoimpl.SizeCache
+	TrustedProxyProtocolToaOnly bool `protobuf:"varint,26,opt,name=trusted_proxy_protocol_toa_only,json=trustedProxyProtocolToaOnly,proto3" json:"trusted_proxy_protocol_toa_only,omitempty"`
+	// trusted_proxy_protocol_auth_context / _keys:可信来源的 PROXY 头要带签名(自定义 TLV 0xE5)才采信。
+	// 配了 keys 时,可信来源发来的头必须带上用其中一把密钥算出的有效签名;没签名、签错、过期、重放的头
+	// 一律读掉忽略(按连接的真实来源处理,不断连接)。context 参与签名,防止这条链的头拿到别的链上用。
+	// keys 每项是 "<key_id>:<base64 密钥>",同时认多把(轮换时新旧两把都在)。
+	TrustedProxyProtocolAuthContext string               `protobuf:"bytes,27,opt,name=trusted_proxy_protocol_auth_context,json=trustedProxyProtocolAuthContext,proto3" json:"trusted_proxy_protocol_auth_context,omitempty"`
+	TrustedProxyProtocolAuthKeys    []string             `protobuf:"bytes,28,rep,name=trusted_proxy_protocol_auth_keys,json=trustedProxyProtocolAuthKeys,proto3" json:"trusted_proxy_protocol_auth_keys,omitempty"`
+	DomainStrategy                  DomainStrategy       `protobuf:"varint,8,opt,name=domain_strategy,json=domainStrategy,proto3,enum=xray.transport.internet.DomainStrategy" json:"domain_strategy,omitempty"`
+	DialerProxy                     string               `protobuf:"bytes,9,opt,name=dialer_proxy,json=dialerProxy,proto3" json:"dialer_proxy,omitempty"`
+	TcpKeepAliveInterval            int32                `protobuf:"varint,10,opt,name=tcp_keep_alive_interval,json=tcpKeepAliveInterval,proto3" json:"tcp_keep_alive_interval,omitempty"`
+	TcpKeepAliveIdle                int32                `protobuf:"varint,11,opt,name=tcp_keep_alive_idle,json=tcpKeepAliveIdle,proto3" json:"tcp_keep_alive_idle,omitempty"`
+	TcpCongestion                   string               `protobuf:"bytes,12,opt,name=tcp_congestion,json=tcpCongestion,proto3" json:"tcp_congestion,omitempty"`
+	Interface                       string               `protobuf:"bytes,13,opt,name=interface,proto3" json:"interface,omitempty"`
+	V6Only                          bool                 `protobuf:"varint,14,opt,name=v6only,proto3" json:"v6only,omitempty"`
+	TcpWindowClamp                  int32                `protobuf:"varint,15,opt,name=tcp_window_clamp,json=tcpWindowClamp,proto3" json:"tcp_window_clamp,omitempty"`
+	TcpUserTimeout                  int32                `protobuf:"varint,16,opt,name=tcp_user_timeout,json=tcpUserTimeout,proto3" json:"tcp_user_timeout,omitempty"`
+	TcpMaxSeg                       int32                `protobuf:"varint,17,opt,name=tcp_max_seg,json=tcpMaxSeg,proto3" json:"tcp_max_seg,omitempty"`
+	Penetrate                       bool                 `protobuf:"varint,18,opt,name=penetrate,proto3" json:"penetrate,omitempty"`
+	TcpMptcp                        bool                 `protobuf:"varint,19,opt,name=tcp_mptcp,json=tcpMptcp,proto3" json:"tcp_mptcp,omitempty"`
+	CustomSockopt                   []*CustomSockopt     `protobuf:"bytes,20,rep,name=customSockopt,proto3" json:"customSockopt,omitempty"`
+	AddressPortStrategy             AddressPortStrategy  `protobuf:"varint,21,opt,name=address_port_strategy,json=addressPortStrategy,proto3,enum=xray.transport.internet.AddressPortStrategy" json:"address_port_strategy,omitempty"`
+	HappyEyeballs                   *HappyEyeballsConfig `protobuf:"bytes,22,opt,name=happy_eyeballs,json=happyEyeballs,proto3" json:"happy_eyeballs,omitempty"`
+	TrustedXForwardedFor            []string             `protobuf:"bytes,23,rep,name=trusted_x_forwarded_for,json=trustedXForwardedFor,proto3" json:"trusted_x_forwarded_for,omitempty"`
+	unknownFields                   protoimpl.UnknownFields
+	sizeCache                       protoimpl.SizeCache
 }
 
 func (x *SocketConfig) Reset() {
@@ -770,6 +776,20 @@ func (x *SocketConfig) GetTrustedProxyProtocolToaOnly() bool {
 		return x.TrustedProxyProtocolToaOnly
 	}
 	return false
+}
+
+func (x *SocketConfig) GetTrustedProxyProtocolAuthContext() string {
+	if x != nil {
+		return x.TrustedProxyProtocolAuthContext
+	}
+	return ""
+}
+
+func (x *SocketConfig) GetTrustedProxyProtocolAuthKeys() []string {
+	if x != nil {
+		return x.TrustedProxyProtocolAuthKeys
+	}
+	return nil
 }
 
 func (x *SocketConfig) GetDomainStrategy() DomainStrategy {
@@ -1004,8 +1024,7 @@ const file_transport_internet_config_proto_rawDesc = "" +
 	"\x05level\x18\x03 \x01(\tR\x05level\x12\x10\n" +
 	"\x03opt\x18\x04 \x01(\tR\x03opt\x12\x14\n" +
 	"\x05value\x18\x05 \x01(\tR\x05value\x12\x12\n" +
-	"\x04type\x18\x06 \x01(\tR\x04type\"\x97\n" +
-	"\n" +
+	"\x04type\x18\x06 \x01(\tR\x04type\"\xad\v\n" +
 	"\fSocketConfig\x12\x12\n" +
 	"\x04mark\x18\x01 \x01(\x05R\x04mark\x12\x10\n" +
 	"\x03tfo\x18\x02 \x01(\x05R\x03tfo\x12H\n" +
@@ -1014,7 +1033,9 @@ const file_transport_internet_config_proto_rawDesc = "" +
 	"\x15accept_proxy_protocol\x18\a \x01(\bR\x13acceptProxyProtocol\x12A\n" +
 	"\x1dtrust_loopback_proxy_protocol\x18\x18 \x01(\bR\x1atrustLoopbackProxyProtocol\x12C\n" +
 	"\x1etrusted_proxy_protocol_sources\x18\x19 \x03(\tR\x1btrustedProxyProtocolSources\x12D\n" +
-	"\x1ftrusted_proxy_protocol_toa_only\x18\x1a \x01(\bR\x1btrustedProxyProtocolToaOnly\x12P\n" +
+	"\x1ftrusted_proxy_protocol_toa_only\x18\x1a \x01(\bR\x1btrustedProxyProtocolToaOnly\x12L\n" +
+	"#trusted_proxy_protocol_auth_context\x18\x1b \x01(\tR\x1ftrustedProxyProtocolAuthContext\x12F\n" +
+	" trusted_proxy_protocol_auth_keys\x18\x1c \x03(\tR\x1ctrustedProxyProtocolAuthKeys\x12P\n" +
 	"\x0fdomain_strategy\x18\b \x01(\x0e2'.xray.transport.internet.DomainStrategyR\x0edomainStrategy\x12!\n" +
 	"\fdialer_proxy\x18\t \x01(\tR\vdialerProxy\x125\n" +
 	"\x17tcp_keep_alive_interval\x18\n" +

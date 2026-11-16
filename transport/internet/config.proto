@@ -144,6 +144,13 @@ message SocketConfig {
   // 连接若恰好没带上 TOA,来源就是上一跳(可信),头就会被采信 —— 这种绑定的出口必须只认 TOA。
   bool trusted_proxy_protocol_toa_only = 26;
 
+  // trusted_proxy_protocol_auth_context / _keys:可信来源的 PROXY 头要带签名(自定义 TLV 0xE5)才采信。
+  // 配了 keys 时,可信来源发来的头必须带上用其中一把密钥算出的有效签名;没签名、签错、过期、重放的头
+  // 一律读掉忽略(按连接的真实来源处理,不断连接)。context 参与签名,防止这条链的头拿到别的链上用。
+  // keys 每项是 "<key_id>:<base64 密钥>",同时认多把(轮换时新旧两把都在)。
+  string trusted_proxy_protocol_auth_context = 27;
+  repeated string trusted_proxy_protocol_auth_keys = 28;
+
   DomainStrategy domain_strategy = 8;
 
   string dialer_proxy = 9;

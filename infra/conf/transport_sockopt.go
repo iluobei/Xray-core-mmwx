@@ -55,23 +55,26 @@ type SocketConfig struct {
 	// TrustedProxyProtocolSources 只信任这些来源(IP / CIDR)的 PROXY 头,头可有可无;转发链出口用。
 	TrustedProxyProtocolSources []string `json:"trustedProxyProtocolSources"`
 	// TrustedProxyProtocolTOAOnly 只认 TOA:可信来源照样采信 TOA,但所有来源的 PROXY 头读掉忽略(转发链入口走内核时用)。
-	TrustedProxyProtocolTOAOnly bool                   `json:"trustedProxyProtocolTOAOnly"`
-	DomainStrategy              string                 `json:"domainStrategy"`
-	DialerProxy                 string                 `json:"dialerProxy"`
-	TCPKeepAliveInterval        int32                  `json:"tcpKeepAliveInterval"`
-	TCPKeepAliveIdle            int32                  `json:"tcpKeepAliveIdle"`
-	TCPCongestion               string                 `json:"tcpCongestion"`
-	TCPWindowClamp              int32                  `json:"tcpWindowClamp"`
-	TCPMaxSeg                   int32                  `json:"tcpMaxSeg"`
-	Penetrate                   bool                   `json:"penetrate"`
-	TCPUserTimeout              int32                  `json:"tcpUserTimeout"`
-	V6only                      bool                   `json:"v6only"`
-	Interface                   string                 `json:"interface"`
-	TcpMptcp                    bool                   `json:"tcpMptcp"`
-	CustomSockopt               []*CustomSockoptConfig `json:"customSockopt"`
-	AddressPortStrategy         string                 `json:"addressPortStrategy"`
-	HappyEyeballsSettings       *HappyEyeballsConfig   `json:"happyEyeballs"`
-	TrustedXForwardedFor        []string               `json:"trustedXForwardedFor"`
+	TrustedProxyProtocolTOAOnly bool `json:"trustedProxyProtocolTOAOnly"`
+	// TrustedProxyProtocolAuthContext / Keys:可信来源的 PROXY 头必须带有效签名才采信(见 common/ppauth)。
+	TrustedProxyProtocolAuthContext string                 `json:"trustedProxyProtocolAuthContext"`
+	TrustedProxyProtocolAuthKeys    []string               `json:"trustedProxyProtocolAuthKeys"`
+	DomainStrategy                  string                 `json:"domainStrategy"`
+	DialerProxy                     string                 `json:"dialerProxy"`
+	TCPKeepAliveInterval            int32                  `json:"tcpKeepAliveInterval"`
+	TCPKeepAliveIdle                int32                  `json:"tcpKeepAliveIdle"`
+	TCPCongestion                   string                 `json:"tcpCongestion"`
+	TCPWindowClamp                  int32                  `json:"tcpWindowClamp"`
+	TCPMaxSeg                       int32                  `json:"tcpMaxSeg"`
+	Penetrate                       bool                   `json:"penetrate"`
+	TCPUserTimeout                  int32                  `json:"tcpUserTimeout"`
+	V6only                          bool                   `json:"v6only"`
+	Interface                       string                 `json:"interface"`
+	TcpMptcp                        bool                   `json:"tcpMptcp"`
+	CustomSockopt                   []*CustomSockoptConfig `json:"customSockopt"`
+	AddressPortStrategy             string                 `json:"addressPortStrategy"`
+	HappyEyeballsSettings           *HappyEyeballsConfig   `json:"happyEyeballs"`
+	TrustedXForwardedFor            []string               `json:"trustedXForwardedFor"`
 }
 
 // Build implements Buildable.
@@ -172,28 +175,30 @@ func (c *SocketConfig) Build() (*internet.SocketConfig, error) {
 	}
 
 	return &internet.SocketConfig{
-		Mark:                        c.Mark,
-		Tfo:                         tfo,
-		Tproxy:                      tproxy,
-		DomainStrategy:              dStrategy,
-		AcceptProxyProtocol:         c.AcceptProxyProtocol,
-		TrustLoopbackProxyProtocol:  c.TrustLoopbackProxyProtocol,
-		TrustedProxyProtocolSources: c.TrustedProxyProtocolSources,
-		TrustedProxyProtocolToaOnly: c.TrustedProxyProtocolTOAOnly,
-		DialerProxy:                 c.DialerProxy,
-		TcpKeepAliveInterval:        c.TCPKeepAliveInterval,
-		TcpKeepAliveIdle:            c.TCPKeepAliveIdle,
-		TcpCongestion:               c.TCPCongestion,
-		TcpWindowClamp:              c.TCPWindowClamp,
-		TcpMaxSeg:                   c.TCPMaxSeg,
-		Penetrate:                   c.Penetrate,
-		TcpUserTimeout:              c.TCPUserTimeout,
-		V6Only:                      c.V6only,
-		Interface:                   c.Interface,
-		TcpMptcp:                    c.TcpMptcp,
-		CustomSockopt:               customSockopts,
-		AddressPortStrategy:         addressPortStrategy,
-		HappyEyeballs:               happyEyeballs,
-		TrustedXForwardedFor:        c.TrustedXForwardedFor,
+		Mark:                            c.Mark,
+		Tfo:                             tfo,
+		Tproxy:                          tproxy,
+		DomainStrategy:                  dStrategy,
+		AcceptProxyProtocol:             c.AcceptProxyProtocol,
+		TrustLoopbackProxyProtocol:      c.TrustLoopbackProxyProtocol,
+		TrustedProxyProtocolSources:     c.TrustedProxyProtocolSources,
+		TrustedProxyProtocolToaOnly:     c.TrustedProxyProtocolTOAOnly,
+		TrustedProxyProtocolAuthContext: c.TrustedProxyProtocolAuthContext,
+		TrustedProxyProtocolAuthKeys:    c.TrustedProxyProtocolAuthKeys,
+		DialerProxy:                     c.DialerProxy,
+		TcpKeepAliveInterval:            c.TCPKeepAliveInterval,
+		TcpKeepAliveIdle:                c.TCPKeepAliveIdle,
+		TcpCongestion:                   c.TCPCongestion,
+		TcpWindowClamp:                  c.TCPWindowClamp,
+		TcpMaxSeg:                       c.TCPMaxSeg,
+		Penetrate:                       c.Penetrate,
+		TcpUserTimeout:                  c.TCPUserTimeout,
+		V6Only:                          c.V6only,
+		Interface:                       c.Interface,
+		TcpMptcp:                        c.TcpMptcp,
+		CustomSockopt:                   customSockopts,
+		AddressPortStrategy:             addressPortStrategy,
+		HappyEyeballs:                   happyEyeballs,
+		TrustedXForwardedFor:            c.TrustedXForwardedFor,
 	}, nil
 }
