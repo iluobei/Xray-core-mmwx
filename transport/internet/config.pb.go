@@ -660,7 +660,12 @@ type SocketConfig struct {
 	// 给转发链出口用:前一跳是链上自己的服务器(公网地址,不是本机),它们在连接开头补一个
 	// PROXY 头把客户端真实 IP 带过来。只信任列表里的来源,别人伪造的头不生效;头是可选的,
 	// 没升级、不发头的前一跳和直连的客户端都不受影响。可与 trust_loopback_proxy_protocol 同时用。
-	TrustedProxyProtocolSources []string             `protobuf:"bytes,25,rep,name=trusted_proxy_protocol_sources,json=trustedProxyProtocolSources,proto3" json:"trusted_proxy_protocol_sources,omitempty"`
+	TrustedProxyProtocolSources []string `protobuf:"bytes,25,rep,name=trusted_proxy_protocol_sources,json=trustedProxyProtocolSources,proto3" json:"trusted_proxy_protocol_sources,omitempty"`
+	// trusted_proxy_protocol_toa_only 只认 TOA:配合 trusted_proxy_protocol_sources 用,来源仍按那份列表采信 TOA
+	// (宿主钩子,见 client_addr_hook.go),但所有来源的 PROXY 头一律读掉并忽略。
+	// 转发链入口走内核转发(TOA)时客户端发的字节原样到出口,客户端自己写的 PROXY 头也会跟着过来;
+	// 连接若恰好没带上 TOA,来源就是上一跳(可信),头就会被采信 —— 这种绑定的出口必须只认 TOA。
+	TrustedProxyProtocolToaOnly bool                 `protobuf:"varint,26,opt,name=trusted_proxy_protocol_toa_only,json=trustedProxyProtocolToaOnly,proto3" json:"trusted_proxy_protocol_toa_only,omitempty"`
 	DomainStrategy              DomainStrategy       `protobuf:"varint,8,opt,name=domain_strategy,json=domainStrategy,proto3,enum=xray.transport.internet.DomainStrategy" json:"domain_strategy,omitempty"`
 	DialerProxy                 string               `protobuf:"bytes,9,opt,name=dialer_proxy,json=dialerProxy,proto3" json:"dialer_proxy,omitempty"`
 	TcpKeepAliveInterval        int32                `protobuf:"varint,10,opt,name=tcp_keep_alive_interval,json=tcpKeepAliveInterval,proto3" json:"tcp_keep_alive_interval,omitempty"`
@@ -758,6 +763,13 @@ func (x *SocketConfig) GetTrustedProxyProtocolSources() []string {
 		return x.TrustedProxyProtocolSources
 	}
 	return nil
+}
+
+func (x *SocketConfig) GetTrustedProxyProtocolToaOnly() bool {
+	if x != nil {
+		return x.TrustedProxyProtocolToaOnly
+	}
+	return false
 }
 
 func (x *SocketConfig) GetDomainStrategy() DomainStrategy {
@@ -992,7 +1004,8 @@ const file_transport_internet_config_proto_rawDesc = "" +
 	"\x05level\x18\x03 \x01(\tR\x05level\x12\x10\n" +
 	"\x03opt\x18\x04 \x01(\tR\x03opt\x12\x14\n" +
 	"\x05value\x18\x05 \x01(\tR\x05value\x12\x12\n" +
-	"\x04type\x18\x06 \x01(\tR\x04type\"\xd1\t\n" +
+	"\x04type\x18\x06 \x01(\tR\x04type\"\x97\n" +
+	"\n" +
 	"\fSocketConfig\x12\x12\n" +
 	"\x04mark\x18\x01 \x01(\x05R\x04mark\x12\x10\n" +
 	"\x03tfo\x18\x02 \x01(\x05R\x03tfo\x12H\n" +
@@ -1000,7 +1013,8 @@ const file_transport_internet_config_proto_rawDesc = "" +
 	"\x1dreceive_original_dest_address\x18\x04 \x01(\bR\x1areceiveOriginalDestAddress\x122\n" +
 	"\x15accept_proxy_protocol\x18\a \x01(\bR\x13acceptProxyProtocol\x12A\n" +
 	"\x1dtrust_loopback_proxy_protocol\x18\x18 \x01(\bR\x1atrustLoopbackProxyProtocol\x12C\n" +
-	"\x1etrusted_proxy_protocol_sources\x18\x19 \x03(\tR\x1btrustedProxyProtocolSources\x12P\n" +
+	"\x1etrusted_proxy_protocol_sources\x18\x19 \x03(\tR\x1btrustedProxyProtocolSources\x12D\n" +
+	"\x1ftrusted_proxy_protocol_toa_only\x18\x1a \x01(\bR\x1btrustedProxyProtocolToaOnly\x12P\n" +
 	"\x0fdomain_strategy\x18\b \x01(\x0e2'.xray.transport.internet.DomainStrategyR\x0edomainStrategy\x12!\n" +
 	"\fdialer_proxy\x18\t \x01(\tR\vdialerProxy\x125\n" +
 	"\x17tcp_keep_alive_interval\x18\n" +

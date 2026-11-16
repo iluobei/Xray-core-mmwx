@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+
+	"github.com/pires/go-proxyproto"
 )
 
 type fakeAddrHook struct {
@@ -107,5 +109,25 @@ func TestClientAddrListenerNoHook(t *testing.T) {
 	defer raw.Close()
 	if l := wrapClientAddrListener(raw, parseTrustedSources([]string{"127.0.0.1"})); l != raw {
 		t.Fatal("没有钩子时应原样返回")
+	}
+}
+
+// 只认 TOA 的出口:任何来源的 PROXY 头都忽略(读掉),包括可信来源。
+func TestProxyProtocolPolicyTOAOnly(t *testing.T) {
+	trusted := []string{"192.0.2.1"}
+	from := &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 4000}
+	f, ok := proxyProtocolPolicyFor(&SocketConfig{TrustedProxyProtocolSources: trusted})
+	if !ok {
+		t.Fatal("配了可信来源应启用")
+	}
+	if p, _ := f(from); p != proxyproto.USE {
+		t.Fatalf("可信来源平时用头:%v", p)
+	}
+	f, ok = proxyProtocolPolicyFor(&SocketConfig{TrustedProxyProtocolSources: trusted, TrustedProxyProtocolToaOnly: true})
+	if !ok {
+		t.Fatal("只认 TOA 时仍要包装(要把头读掉)")
+	}
+	if p, _ := f(from); p != proxyproto.IGNORE {
+		t.Fatalf("只认 TOA 时可信来源的头也忽略:%v", p)
 	}
 }

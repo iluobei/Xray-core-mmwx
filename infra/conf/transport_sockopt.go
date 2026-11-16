@@ -53,7 +53,9 @@ type SocketConfig struct {
 	// 详见 transport/internet/proxy_protocol_policy.go。
 	TrustLoopbackProxyProtocol bool `json:"trustLoopbackProxyProtocol"`
 	// TrustedProxyProtocolSources 只信任这些来源(IP / CIDR)的 PROXY 头,头可有可无;转发链出口用。
-	TrustedProxyProtocolSources []string               `json:"trustedProxyProtocolSources"`
+	TrustedProxyProtocolSources []string `json:"trustedProxyProtocolSources"`
+	// TrustedProxyProtocolTOAOnly 只认 TOA:可信来源照样采信 TOA,但所有来源的 PROXY 头读掉忽略(转发链入口走内核时用)。
+	TrustedProxyProtocolTOAOnly bool                   `json:"trustedProxyProtocolTOAOnly"`
 	DomainStrategy              string                 `json:"domainStrategy"`
 	DialerProxy                 string                 `json:"dialerProxy"`
 	TCPKeepAliveInterval        int32                  `json:"tcpKeepAliveInterval"`
@@ -177,6 +179,7 @@ func (c *SocketConfig) Build() (*internet.SocketConfig, error) {
 		AcceptProxyProtocol:         c.AcceptProxyProtocol,
 		TrustLoopbackProxyProtocol:  c.TrustLoopbackProxyProtocol,
 		TrustedProxyProtocolSources: c.TrustedProxyProtocolSources,
+		TrustedProxyProtocolToaOnly: c.TrustedProxyProtocolTOAOnly,
 		DialerProxy:                 c.DialerProxy,
 		TcpKeepAliveInterval:        c.TCPKeepAliveInterval,
 		TcpKeepAliveIdle:            c.TCPKeepAliveIdle,

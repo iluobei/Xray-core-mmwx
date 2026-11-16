@@ -43,7 +43,10 @@ func currentClientAddrHook() ClientAddrHook {
 }
 
 // wrapClientAddrListener 给配了可信来源的 TCP 监听套一层;没有钩子或不是 TCP 时原样返回。
-// 套在 PROXY 头那层的里面:连接带了 PROXY 头仍以头为准,没带头时 RemoteAddr 才回落到这里查到的 TOA 地址。
+// 套在 PROXY 头那层的里面:PROXY 头那层按这里的 RemoteAddr 判断来源可不可信 —— 查到 TOA 时它是真实客户端
+// (不在可信列表里),头就被忽略,以 TOA 为准;没有 TOA 时才是上一跳,头按可信来源处理
+// (出口配了 trusted_proxy_protocol_toa_only 时头一律忽略,见 proxy_protocol_policy.go)。
+// 凡是配了可信来源的监听都套:出口并不知道入口这会儿用的是 TOA 还是 PROXY 头,两样都得认。
 func wrapClientAddrListener(l net.Listener, trusted []netip.Prefix) net.Listener {
 	h := currentClientAddrHook()
 	if h == nil || len(trusted) == 0 {

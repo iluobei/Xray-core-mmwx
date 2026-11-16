@@ -28,6 +28,13 @@ import (
 // trusted_proxy_protocol_sources 是同一个宽容模式,只是「可信」从本机扩展到一组指定来源:
 // 转发链出口的前一跳是链上自己的服务器(公网地址),由它们在连接开头补 PROXY 头带来客户端真实 IP。
 // 列表里的来源有头就用、没头放行;列表外的来源头被读掉并忽略 —— 与上面同一条安全要害。
+//
+// 判断来源用的是连接的 RemoteAddr:宿主钩子(client_addr_hook.go)查到 TOA 时它已经是真实客户端地址,
+// 不在列表里,头就被忽略 —— 带 TOA 的连接以 TOA 为准。
+//
+// trusted_proxy_protocol_toa_only:转发链入口走内核转发(TOA)时,客户端发的字节原样到出口,客户端自己写的
+// PROXY 头也跟着过来;连接若没带上 TOA(插不进去、被线路剥掉),来源就是上一跳,头会被当成可信的。
+// 这种出口所有来源的头都读掉忽略,真实地址只从 TOA 来。
 
 // proxyProtocolPolicyFor 返回该 socket 配置对应的策略函数;enabled=false 表示压根不用包装。
 func proxyProtocolPolicyFor(sockopt *SocketConfig) (func(net.Addr) (proxyproto.Policy, error), bool) {
@@ -42,6 +49,9 @@ func proxyProtocolPolicyFor(sockopt *SocketConfig) (func(net.Addr) (proxyproto.P
 	// 免得升级后原有部署的行为悄悄变松。
 	if sockopt.AcceptProxyProtocol {
 		return func(net.Addr) (proxyproto.Policy, error) { return proxyproto.REQUIRE, nil }, true
+	}
+	if sockopt.TrustedProxyProtocolToaOnly {
+		return func(net.Addr) (proxyproto.Policy, error) { return proxyproto.IGNORE, nil }, true
 	}
 	loopback := sockopt.TrustLoopbackProxyProtocol
 	return func(upstream net.Addr) (proxyproto.Policy, error) {
