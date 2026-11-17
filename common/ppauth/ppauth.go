@@ -173,8 +173,12 @@ type Verifier struct {
 	keys    map[byte][]byte
 	now     func() time.Time
 
-	mu   sync.Mutex
-	seen map[[8]byte]int64 // 随机数 → 过期时间(unix 秒)
+	// 见过的随机数,分两代:每 2×Window 整代轮换一次(cur → old,old 丢掉),查重看两代。
+	// 一个随机数至少留 2×Window,够覆盖它的签名还有效的时间;查和清都是 O(1),不用扫表。
+	mu    sync.Mutex
+	cur   map[[8]byte]struct{}
+	old   map[[8]byte]struct{}
+	rotAt int64 // 下次轮换的时间(unix 秒)
 }
 
 // NewVerifier keys 为空时返回 nil(不验签)。
@@ -182,7 +186,7 @@ func NewVerifier(context string, keys []Key) *Verifier {
 	if len(keys) == 0 {
 		return nil
 	}
-	v := &Verifier{context: context, keys: map[byte][]byte{}, now: time.Now, seen: map[[8]byte]int64{}}
+	v := &Verifier{context: context, keys: map[byte][]byte{}, now: time.Now, cur: map[[8]byte]struct{}{}, old: map[[8]byte]struct{}{}}
 	for _, k := range keys {
 		v.keys[k.ID] = k.Secret
 	}
@@ -234,18 +238,23 @@ func (v *Verifier) Verify(h *proxyproto.Header) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	nowUnix := now.Unix()
-	if exp, dup := v.seen[n]; dup && exp > nowUnix {
+	if nowUnix >= v.rotAt {
+		gen := int64(2 * Window / time.Second)
+		if nowUnix >= v.rotAt+gen {
+			v.old = map[[8]byte]struct{}{} // 两代都过期了(很久没连接)
+		} else {
+			v.old = v.cur
+		}
+		v.cur = map[[8]byte]struct{}{}
+		v.rotAt = nowUnix + gen
+	}
+	if _, dup := v.cur[n]; dup {
 		return ErrReplay
 	}
-	if len(v.seen) >= 1<<16 {
-		for k, exp := range v.seen {
-			if exp <= nowUnix {
-				delete(v.seen, k)
-			}
-		}
+	if _, dup := v.old[n]; dup {
+		return ErrReplay
 	}
-	// 表满了也照常记下:随机数是 8 字节随机值,窗口内真实连接数远到不了这个量级,
-	// 塞满它只能靠有效签名,而有效签名只有持有密钥的一方能产出。
-	v.seen[n] = int64(ts) + int64(2*Window/time.Second)
+	// 只有签名完全有效的才记:塞满它只能靠有效签名,而有效签名只有持有密钥的一方能产出。
+	v.cur[n] = struct{}{}
 	return nil
 }

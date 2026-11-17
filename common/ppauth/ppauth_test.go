@@ -157,3 +157,36 @@ func TestParseKey(t *testing.T) {
 		t.Fatal("没有密钥时不该验签")
 	}
 }
+
+// 防重放表整代轮换:记下之后刚好轮换一次,窗口内重放照样拦住;很久以后两代都清掉。
+func TestReplayAcrossGeneration(t *testing.T) {
+	k, _ := NewKey(1)
+	now := time.Unix(1_800_000_000, 0)
+	h := header("203.0.113.9:51000", "198.51.100.2:443")
+	if err := Sign(h, k, "ctx", now); err != nil {
+		t.Fatal(err)
+	}
+	h = wire(t, h)
+	v := NewVerifier("ctx", []Key{k})
+	v.now = func() time.Time { return now }
+	if err := v.Verify(h); err != nil {
+		t.Fatal(err)
+	}
+	v.rotAt = now.Unix() + 1 // 下一秒就轮换
+	v.now = func() time.Time { return now.Add(100 * time.Second) }
+	if err := v.Verify(h); err != ErrReplay {
+		t.Fatalf("轮换到旧一代之后窗口内重放应拦住: %v", err)
+	}
+	if len(v.old) != 1 || len(v.cur) != 0 {
+		t.Fatalf("应已轮换: old=%d cur=%d", len(v.old), len(v.cur))
+	}
+	v.now = func() time.Time { return now.Add(10 * time.Hour) }
+	other := header("203.0.113.9:51001", "198.51.100.2:443")
+	_ = Sign(other, k, "ctx", now.Add(10*time.Hour))
+	if err := v.Verify(wire(t, other)); err != nil {
+		t.Fatal(err)
+	}
+	if len(v.old) != 0 || len(v.cur) != 1 {
+		t.Fatalf("很久没连接后两代都应清掉: old=%d cur=%d", len(v.old), len(v.cur))
+	}
+}
