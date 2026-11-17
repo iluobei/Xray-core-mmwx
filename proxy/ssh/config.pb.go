@@ -7,6 +7,7 @@
 package ssh
 
 import (
+	net "github.com/xtls/xray-core/common/net"
 	protocol "github.com/xtls/xray-core/common/protocol"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
@@ -148,11 +149,148 @@ func (x *ServerConfig) GetServerVersion() string {
 	return ""
 }
 
+// ClientConfig 是 SSH 出站:连上一台 SSH 服务器,每个代理请求开一个 direct-tcpip 通道(只支持 TCP)。
+// 一个出站共用一条 SSH 连接,断了下次请求时重连。
+type ClientConfig struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Address  *net.IPOrDomain        `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	Port     uint32                 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"` // 0 = 22
+	User     string                 `protobuf:"bytes,3,opt,name=user,proto3" json:"user,omitempty"`  // 空 = root
+	Password string                 `protobuf:"bytes,4,opt,name=password,proto3" json:"password,omitempty"`
+	// 私钥(PEM,OpenSSH / PKCS#1 / PKCS#8),可带口令。
+	PrivateKey           string `protobuf:"bytes,5,opt,name=private_key,json=privateKey,proto3" json:"private_key,omitempty"`
+	PrivateKeyPassphrase string `protobuf:"bytes,6,opt,name=private_key_passphrase,json=privateKeyPassphrase,proto3" json:"private_key_passphrase,omitempty"`
+	// 允许的服务器主机公钥(authorized_keys 格式,如 "ssh-ed25519 AAAA...")。空 = 接受任何主机公钥。
+	HostKey           []string `protobuf:"bytes,7,rep,name=host_key,json=hostKey,proto3" json:"host_key,omitempty"`
+	HostKeyAlgorithms []string `protobuf:"bytes,8,rep,name=host_key_algorithms,json=hostKeyAlgorithms,proto3" json:"host_key_algorithms,omitempty"`
+	// 握手时的客户端版本串(须以 "SSH-2.0-" 开头)。空 = 随机一个 OpenSSH 版本串。
+	ClientVersion string   `protobuf:"bytes,9,opt,name=client_version,json=clientVersion,proto3" json:"client_version,omitempty"`
+	Ciphers       []string `protobuf:"bytes,10,rep,name=ciphers,proto3" json:"ciphers,omitempty"`
+	Macs          []string `protobuf:"bytes,11,rep,name=macs,proto3" json:"macs,omitempty"`
+	KexAlgorithms []string `protobuf:"bytes,12,rep,name=kex_algorithms,json=kexAlgorithms,proto3" json:"kex_algorithms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClientConfig) Reset() {
+	*x = ClientConfig{}
+	mi := &file_proxy_ssh_config_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClientConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClientConfig) ProtoMessage() {}
+
+func (x *ClientConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_proxy_ssh_config_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClientConfig.ProtoReflect.Descriptor instead.
+func (*ClientConfig) Descriptor() ([]byte, []int) {
+	return file_proxy_ssh_config_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ClientConfig) GetAddress() *net.IPOrDomain {
+	if x != nil {
+		return x.Address
+	}
+	return nil
+}
+
+func (x *ClientConfig) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+func (x *ClientConfig) GetUser() string {
+	if x != nil {
+		return x.User
+	}
+	return ""
+}
+
+func (x *ClientConfig) GetPassword() string {
+	if x != nil {
+		return x.Password
+	}
+	return ""
+}
+
+func (x *ClientConfig) GetPrivateKey() string {
+	if x != nil {
+		return x.PrivateKey
+	}
+	return ""
+}
+
+func (x *ClientConfig) GetPrivateKeyPassphrase() string {
+	if x != nil {
+		return x.PrivateKeyPassphrase
+	}
+	return ""
+}
+
+func (x *ClientConfig) GetHostKey() []string {
+	if x != nil {
+		return x.HostKey
+	}
+	return nil
+}
+
+func (x *ClientConfig) GetHostKeyAlgorithms() []string {
+	if x != nil {
+		return x.HostKeyAlgorithms
+	}
+	return nil
+}
+
+func (x *ClientConfig) GetClientVersion() string {
+	if x != nil {
+		return x.ClientVersion
+	}
+	return ""
+}
+
+func (x *ClientConfig) GetCiphers() []string {
+	if x != nil {
+		return x.Ciphers
+	}
+	return nil
+}
+
+func (x *ClientConfig) GetMacs() []string {
+	if x != nil {
+		return x.Macs
+	}
+	return nil
+}
+
+func (x *ClientConfig) GetKexAlgorithms() []string {
+	if x != nil {
+		return x.KexAlgorithms
+	}
+	return nil
+}
+
 var File_proxy_ssh_config_proto protoreflect.FileDescriptor
 
 const file_proxy_ssh_config_proto_rawDesc = "" +
 	"\n" +
-	"\x16proxy/ssh/config.proto\x12\x0exray.proxy.ssh\x1a\x1acommon/protocol/user.proto\"j\n" +
+	"\x16proxy/ssh/config.proto\x12\x0exray.proxy.ssh\x1a\x1acommon/protocol/user.proto\x1a\x18common/net/address.proto\"j\n" +
 	"\aAccount\x12\x1a\n" +
 	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12'\n" +
@@ -160,7 +298,22 @@ const file_proxy_ssh_config_proto_rawDesc = "" +
 	"\fServerConfig\x120\n" +
 	"\x05users\x18\x01 \x03(\v2\x1a.xray.common.protocol.UserR\x05users\x12\x19\n" +
 	"\bhost_key\x18\x02 \x01(\tR\ahostKey\x12%\n" +
-	"\x0eserver_version\x18\x03 \x01(\tR\rserverVersionBL\n" +
+	"\x0eserver_version\x18\x03 \x01(\tR\rserverVersion\"\xa7\x03\n" +
+	"\fClientConfig\x125\n" +
+	"\aaddress\x18\x01 \x01(\v2\x1b.xray.common.net.IPOrDomainR\aaddress\x12\x12\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port\x12\x12\n" +
+	"\x04user\x18\x03 \x01(\tR\x04user\x12\x1a\n" +
+	"\bpassword\x18\x04 \x01(\tR\bpassword\x12\x1f\n" +
+	"\vprivate_key\x18\x05 \x01(\tR\n" +
+	"privateKey\x124\n" +
+	"\x16private_key_passphrase\x18\x06 \x01(\tR\x14privateKeyPassphrase\x12\x19\n" +
+	"\bhost_key\x18\a \x03(\tR\ahostKey\x12.\n" +
+	"\x13host_key_algorithms\x18\b \x03(\tR\x11hostKeyAlgorithms\x12%\n" +
+	"\x0eclient_version\x18\t \x01(\tR\rclientVersion\x12\x18\n" +
+	"\aciphers\x18\n" +
+	" \x03(\tR\aciphers\x12\x12\n" +
+	"\x04macs\x18\v \x03(\tR\x04macs\x12%\n" +
+	"\x0ekex_algorithms\x18\f \x03(\tR\rkexAlgorithmsBL\n" +
 	"\x12com.xray.proxy.sshP\x01Z#github.com/xtls/xray-core/proxy/ssh\xaa\x02\x0eXray.Proxy.Sshb\x06proto3"
 
 var (
@@ -175,19 +328,22 @@ func file_proxy_ssh_config_proto_rawDescGZIP() []byte {
 	return file_proxy_ssh_config_proto_rawDescData
 }
 
-var file_proxy_ssh_config_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_proxy_ssh_config_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_proxy_ssh_config_proto_goTypes = []any{
-	(*Account)(nil),       // 0: xray.proxy.ssh.Account
-	(*ServerConfig)(nil),  // 1: xray.proxy.ssh.ServerConfig
-	(*protocol.User)(nil), // 2: xray.common.protocol.User
+	(*Account)(nil),        // 0: xray.proxy.ssh.Account
+	(*ServerConfig)(nil),   // 1: xray.proxy.ssh.ServerConfig
+	(*ClientConfig)(nil),   // 2: xray.proxy.ssh.ClientConfig
+	(*protocol.User)(nil),  // 3: xray.common.protocol.User
+	(*net.IPOrDomain)(nil), // 4: xray.common.net.IPOrDomain
 }
 var file_proxy_ssh_config_proto_depIdxs = []int32{
-	2, // 0: xray.proxy.ssh.ServerConfig.users:type_name -> xray.common.protocol.User
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	3, // 0: xray.proxy.ssh.ServerConfig.users:type_name -> xray.common.protocol.User
+	4, // 1: xray.proxy.ssh.ClientConfig.address:type_name -> xray.common.net.IPOrDomain
+	2, // [2:2] is the sub-list for method output_type
+	2, // [2:2] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_proxy_ssh_config_proto_init() }
@@ -201,7 +357,7 @@ func file_proxy_ssh_config_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proxy_ssh_config_proto_rawDesc), len(file_proxy_ssh_config_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

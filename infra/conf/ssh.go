@@ -50,3 +50,43 @@ func (c *SSHServerConfig) Build() (proto.Message, error) {
 	}
 	return cfg, nil
 }
+
+// SSHClientConfig 是 SSH 出站的 JSON 配置。字段含义对齐 sing-box 的 ssh 出站
+// (server / server_port / user / password / private_key / host_key …),写法按本项目的驼峰风格。
+type SSHClientConfig struct {
+	Address              *Address   `json:"address"`
+	Port                 uint16     `json:"port"`
+	User                 string     `json:"user"`
+	Password             string     `json:"password"`
+	PrivateKey           string     `json:"privateKey"`
+	PrivateKeyPassphrase string     `json:"privateKeyPassphrase"`
+	HostKey              StringList `json:"hostKey"`
+	HostKeyAlgorithms    StringList `json:"hostKeyAlgorithms"`
+	ClientVersion        string     `json:"clientVersion"`
+	Ciphers              StringList `json:"ciphers"`
+	MACs                 StringList `json:"macs"`
+	KexAlgorithms        StringList `json:"kexAlgorithms"`
+}
+
+func (c *SSHClientConfig) Build() (proto.Message, error) {
+	if c.Address == nil {
+		return nil, errors.New("SSH: server address is required")
+	}
+	if c.Password == "" && c.PrivateKey == "" {
+		return nil, errors.New("SSH: password or privateKey is required")
+	}
+	return &ssh.ClientConfig{
+		Address:              c.Address.Build(),
+		Port:                 uint32(c.Port),
+		User:                 c.User,
+		Password:             c.Password,
+		PrivateKey:           c.PrivateKey,
+		PrivateKeyPassphrase: c.PrivateKeyPassphrase,
+		HostKey:              c.HostKey,
+		HostKeyAlgorithms:    c.HostKeyAlgorithms,
+		ClientVersion:        c.ClientVersion,
+		Ciphers:              c.Ciphers,
+		Macs:                 c.MACs,
+		KexAlgorithms:        c.KexAlgorithms,
+	}, nil
+}

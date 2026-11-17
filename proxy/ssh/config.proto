@@ -7,6 +7,7 @@ option java_package = "com.xray.proxy.ssh";
 option java_multiple_files = true;
 
 import "common/protocol/user.proto";
+import "common/net/address.proto";
 
 // Account 是 SSH 入站的用户凭据:用户名 + 密码,和/或 authorized_keys 格式的公钥。
 // 密码与公钥至少要有一样;两样都配时任一通过即可(与 OpenSSH 默认一致)。
@@ -24,4 +25,24 @@ message ServerConfig {
   string host_key = 2;
   // 握手时对外宣称的版本串,为空用内置的 OpenSSH 伪装串。
   string server_version = 3;
+}
+
+// ClientConfig 是 SSH 出站:连上一台 SSH 服务器,每个代理请求开一个 direct-tcpip 通道(只支持 TCP)。
+// 一个出站共用一条 SSH 连接,断了下次请求时重连。
+message ClientConfig {
+  xray.common.net.IPOrDomain address = 1;
+  uint32 port = 2; // 0 = 22
+  string user = 3; // 空 = root
+  string password = 4;
+  // 私钥(PEM,OpenSSH / PKCS#1 / PKCS#8),可带口令。
+  string private_key = 5;
+  string private_key_passphrase = 6;
+  // 允许的服务器主机公钥(authorized_keys 格式,如 "ssh-ed25519 AAAA...")。空 = 接受任何主机公钥。
+  repeated string host_key = 7;
+  repeated string host_key_algorithms = 8;
+  // 握手时的客户端版本串(须以 "SSH-2.0-" 开头)。空 = 随机一个 OpenSSH 版本串。
+  string client_version = 9;
+  repeated string ciphers = 10;
+  repeated string macs = 11;
+  repeated string kex_algorithms = 12;
 }

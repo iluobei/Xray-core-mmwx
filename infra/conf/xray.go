@@ -63,6 +63,7 @@ var (
 		"wireguard":   func() interface{} { return &WireGuardConfig{IsClient: true} },
 		"anytls":      func() interface{} { return new(AnyTLSClientConfig) },
 		"snell":       func() interface{} { return new(SnellClientConfig) },
+		"ssh":         func() interface{} { return new(SSHClientConfig) },
 	}, "protocol", "settings")
 )
 
