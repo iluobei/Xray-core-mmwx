@@ -1,6 +1,7 @@
 package internet
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"sync"
@@ -127,4 +128,30 @@ func (c *clientAddrConn) RemoteAddr() net.Addr {
 		c.resolved, c.done = c.raw, true
 	}
 	return c.raw
+}
+
+// CloseWrite / CloseRead 透传给底层 TCP 连接:REALITY 把 PROXY 头那层剥掉后要求拿到的原始连接能半关
+// (断言 CloseWriteConn,断言失败直接 panic),不透传整个进程会崩。
+func (c *clientAddrConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return errors.New("client addr conn: underlying conn does not support CloseWrite")
+}
+
+func (c *clientAddrConn) CloseRead() error {
+	if cr, ok := c.Conn.(interface{ CloseRead() error }); ok {
+		return cr.CloseRead()
+	}
+	return errors.New("client addr conn: underlying conn does not support CloseRead")
+}
+
+// UnwrapClientAddrConn 剥掉查真实客户端地址的那层,返回底层连接;不是这层时原样返回。
+// 给 splice / readv / SO_LINGER 等要拿 *net.TCPConn 或 syscall.Conn 的地方用(proxy.UnwrapRawConn)——
+// 这些地方只操作 fd,不看 RemoteAddr。
+func UnwrapClientAddrConn(c net.Conn) net.Conn {
+	if cc, ok := c.(*clientAddrConn); ok {
+		return cc.Conn
+	}
+	return c
 }

@@ -732,6 +732,8 @@ func UnwrapRawConn(conn net.Conn) (net.Conn, stats.Counter, stats.Counter) {
 			conn = pc.Raw()
 			// 8192 > 4096, there is no need to process pc's bufReader
 		}
+		// 转发链出口(可信来源)的连接在 PROXY 头那层里面还套了一层查 TOA 的包装,剥掉才拿得到 *net.TCPConn(splice / readv)
+		conn = internet.UnwrapClientAddrConn(conn)
 		if uc, ok := conn.(*internet.UnixConnWrapper); ok {
 			conn = uc.UnixConn
 		}
