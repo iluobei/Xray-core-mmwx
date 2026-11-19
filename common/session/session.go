@@ -62,6 +62,8 @@ type Inbound struct {
 	// 返回允许搬的字节数(可以更少;<= 0 表示不搬了,直通在两段之间停下)。限速器借它在直通里按段取令牌,
 	// 不必为了限速把连接逼回用户态。等待发生在两段之间,入站中止不受影响。
 	SpliceGate func(n int64) int64
+	// UplinkSplice 非 nil 时,入站可以把上行的一段直接 splice 到目标连接、不经 link。见 UplinkSplice。
+	UplinkSplice *UplinkSplice
 }
 
 // SpliceFramer 让「同一条连接上先后跑很多条流」的入站也能用 splice 直通。

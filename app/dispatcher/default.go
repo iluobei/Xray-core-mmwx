@@ -157,6 +157,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 	if sessionInbound != nil {
 		user = sessionInbound.User
 	}
+	var upCounter stats.Counter
 
 	if user != nil && len(user.Email) > 0 {
 		p := d.policy.ForLevel(user.Level)
@@ -167,6 +168,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 					Counter: c,
 					Writer:  inboundLink.Writer,
 				}
+				upCounter = c
 			}
 		}
 		if p.Stats.UserDownlink {
@@ -182,6 +184,16 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 		if p.Stats.UserOnline {
 			trackOnlineIP(ctx, d.stats, user.Email, sessionInbound.Source.Address.String())
 		}
+	}
+
+	// 上行裸段可以绕过 link 直接 splice 进目标(session.UplinkSplice):这里的 link 上只挂了用户上行统计,
+	// 绕过的字节记进同一个计数器就行。
+	if sessionInbound != nil && sessionInbound.UplinkSplice != nil {
+		us := sessionInbound.UplinkSplice
+		if upCounter != nil {
+			us.Account = func(n int64) { upCounter.Add(n) }
+		}
+		us.Enabled = true
 	}
 
 	return inboundLink, outboundLink

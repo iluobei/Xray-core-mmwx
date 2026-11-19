@@ -401,6 +401,22 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 				})
 			} else {
 				writer = buf.NewWriter(conn)
+				// 入站(Miu)要自己把上行裸段 splice 进目标:登记目标连接,并报告从 link 写进去了多少,见 session.UplinkSplice。
+				if inbound := session.InboundFromContext(ctx); inbound != nil && inbound.UplinkSplice != nil && inbound.UplinkSplice.Enabled &&
+					proxy.IsRAWTransportWithoutSecurity(conn) {
+					if raw, _, wc := proxy.UnwrapRawConn(conn); raw != nil {
+						if tc, ok := raw.(*net.TCPConn); ok {
+							us := inbound.UplinkSplice
+							var counter interface{ Add(int64) int64 }
+							if wc != nil {
+								counter = wc
+							}
+							us.SetTarget(tc, counter, timer.Update)
+							defer us.Close()
+							writer = &uplinkSpliceWriter{Writer: writer, us: us}
+						}
+					}
+				}
 			}
 		} else {
 			writer = NewPacketWriter(conn, h, defaultRule, UDPOverride, destination, outGateway)
@@ -806,4 +822,20 @@ func GenerateRandomBytes(n int64) ([]byte, error) {
 	}
 
 	return b, nil
+}
+
+// uplinkSpliceWriter 把每次写进目标的字节数报给 session.UplinkSplice,入站据此知道排在前面的上行已经写完。
+type uplinkSpliceWriter struct {
+	buf.Writer
+	us *session.UplinkSplice
+}
+
+func (w *uplinkSpliceWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	n := int64(mb.Len())
+	if err := w.Writer.WriteMultiBuffer(mb); err != nil {
+		w.us.Close()
+		return err
+	}
+	w.us.Wrote(n)
+	return nil
 }
