@@ -91,6 +91,19 @@ type SpliceFramerData interface {
 	Data(p []byte) (ok bool, err error)
 }
 
+// SpliceFramerRecords 是 SpliceFramer 的可选扩展:入站要求每一段直通都由完整的 TLS 记录组成——从记录边界开始、
+// 在记录边界结束。Miu 的裸段夹在它自己的外层 TLS 记录之间,一段切在内层记录中间的话,下一条外层记录就插进了
+// 这条内层记录里,线上字节按记录头就读不下去了。
+//
+// 出站先偷看源连接里等着的字节(不取走),只把其中完整的记录声明成一段;一条记录还没到齐时等它一会儿,
+// 等不到就把已到的部分读进用户态交给 Data(所以要同时实现 SpliceFramerData),这条记录剩下的随后也交给 Data。
+type SpliceFramerRecords interface {
+	SpliceFramerData
+	// Owed 在每一段之前调用:源连接开头还有多少字节属于一条已经有一部分交给了 Data 的记录(0 = 正好在记录边界上;
+	// < 0 = 入站已经跟丢了记录边界,余下的全部交给 Data)。入站在 Data 里沿交过来的字节跟踪边界。
+	Owed() int
+}
+
 // Outbound is the metadata of an outbound connection.
 type Outbound struct {
 	// Target address of the outbound connection.

@@ -11,8 +11,10 @@ import (
 	"crypto/rand"
 	"io"
 	"math/big"
+	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -860,7 +862,45 @@ func spliceFramed(dst io.Writer, src net.Conn, f session.SpliceFramer, closeLink
 	defer func() { f.Finish(broken) }()
 	seg := int64(spliceSegmentMin)
 	small, _ := f.(session.SpliceFramerData)
-	var smallBuf []byte
+	rec, _ := f.(session.SpliceFramerRecords)
+	var dataBuf []byte
+	// readData 把源连接开头至多 k 个字节读进用户态交给 Data。stop = 直通到此为止(err 为 nil 时是正常结束)。
+	readData := func(k int64) (stop bool, err error) {
+		if dataBuf == nil {
+			size := spliceSmall
+			if rec != nil {
+				size = spliceDataMax
+			}
+			dataBuf = make([]byte, size)
+		}
+		if k > int64(len(dataBuf)) {
+			k = int64(len(dataBuf))
+		}
+		r, rerr := src.Read(dataBuf[:k])
+		if r > 0 {
+			ok, werr := small.Data(dataBuf[:r])
+			if werr != nil {
+				broken = werr
+				return true, werr
+			}
+			if !ok {
+				return true, nil
+			}
+			account(int64(r))
+			if touch != nil {
+				touch()
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return true, nil
+			}
+			return true, rerr
+		}
+		return false, nil
+	}
+	// credit:闸门已经放行、还没搬的字节。按记录边界切时一段常比放行的少,剩下的留给下一段,不再向闸门要一遍。
+	var credit int64
 	for {
 		n, err := readableBytes(src)
 		if err == io.EOF {
@@ -869,31 +909,22 @@ func spliceFramed(dst io.Writer, src net.Conn, f session.SpliceFramer, closeLink
 		if err != nil {
 			return err
 		}
-		if small != nil && n < spliceSmall {
+		if rec != nil {
+			if owed := rec.Owed(); owed != 0 {
+				// 一条记录已经有一部分交给了 Data(或者入站跟丢了边界):剩下的也交给 Data
+				k := n
+				if owed > 0 && k > int64(owed) {
+					k = int64(owed)
+				}
+				if stop, err := readData(k); stop {
+					return err
+				}
+				continue
+			}
+		} else if small != nil && n < spliceSmall {
 			// 这几个字节已经在内核里:读出来交给入站写成它自己的数据帧,省掉分段头 + 直通的几次系统调用
-			if smallBuf == nil {
-				smallBuf = make([]byte, spliceSmall)
-			}
-			k, rerr := src.Read(smallBuf[:n])
-			if k > 0 {
-				ok, werr := small.Data(smallBuf[:k])
-				if werr != nil {
-					broken = werr
-					return werr
-				}
-				if !ok {
-					return nil
-				}
-				account(int64(k))
-				if touch != nil {
-					touch()
-				}
-			}
-			if rerr != nil {
-				if rerr == io.EOF {
-					return nil
-				}
-				return rerr
+			if stop, err := readData(n); stop {
+				return err
 			}
 			continue
 		}
@@ -905,17 +936,56 @@ func spliceFramed(dst io.Writer, src net.Conn, f session.SpliceFramer, closeLink
 			if touch != nil {
 				touch()
 			}
-			allowed := gate(n)
-			if allowed <= 0 {
-				return nil // 不搬了(请求结束 / 被踢):停在两段之间,连接上的分段是完整的
+			if credit < n {
+				allowed := gate(n - credit)
+				if allowed <= 0 {
+					return nil // 不搬了(请求结束 / 被踢):停在两段之间,连接上的分段是完整的
+				}
+				credit += allowed
 			}
-			if allowed < n {
-				n, full = allowed, false
+			if credit < n {
+				n, full = credit, false
 			}
 			if touch != nil {
 				touch()
 			}
 		}
+		if rec != nil {
+			m, last, more, bad, err := peekRecords(src, n)
+			if err != nil {
+				if err == io.EOF {
+					return nil
+				}
+				return err
+			}
+			var stop bool
+			whole := false // 这一段搬完整的记录;否则这一轮只交了 Data(或者在等),回头再看
+			switch {
+			case bad:
+				// 读不成 TLS 记录:交给 Data,入站沿这些字节会发现跟丢了,余下的随后都走 Data
+				stop, err = readData(m)
+			case last == 0:
+				// 一条完整的记录都还没有:等它到齐,最多 spliceHoldWait;到时还没齐,已到的部分交给 Data。
+				// 闸门放行的不够一条记录时缓冲里已经有这么多,立刻返回,回头再向闸门要。
+				if _, werr := readableAtLeast(src, m+more, time.Now().Add(spliceHoldWait)); werr != nil {
+					if !os.IsTimeout(werr) {
+						return werr
+					}
+					stop, err = readData(m)
+				}
+			case last < spliceSmall:
+				stop, err = readData(last)
+			default:
+				n, whole = last, true
+			}
+			if stop {
+				return err
+			}
+			if !whole {
+				continue
+			}
+		}
+		credit -= min(credit, n)
 		// 发送缓冲里积压的未发数据先降下来再交下一段:积压都排在中止后的 END 前面。
 		// 计时从这里起:稳态下「等积压降下来 + 拷进内核」才是一段真正送出去的耗时;只计拷贝的话,
 		// 发送缓冲有空时拷贝几乎瞬间完成,段长会一路涨到上限,积压上限也跟着放宽,把关形同虚设。
@@ -945,6 +1015,49 @@ func spliceFramed(dst io.Writer, src net.Conn, f session.SpliceFramer, closeLink
 		if touch != nil {
 			touch()
 		}
+	}
+}
+
+// 按 TLS 记录切段(session.SpliceFramerRecords)用的取值。
+const (
+	// 一条记录后半截还没到时最多等这么久,之后已到的部分走 Data(内层 TLS 本来就要等整条记录到齐才能用)。
+	spliceHoldWait = 20 * time.Millisecond
+	// 交给 Data 的一块的上限:放得下一条最长的 TLS 记录(2^14 + 256 + 5)。
+	spliceDataMax = 17 << 10
+)
+
+// spliceRecordPeek 是偷看源连接用的缓冲,大小同 spliceSegmentMax:窗口小了段就跟着变短(128 KB 时段数 ×9)。
+// 只在找边界的那一下借用。
+var spliceRecordPeek = sync.Pool{New: func() any { b := make([]byte, spliceSegmentMax); return &b }}
+
+// peekRecords 偷看源连接里至多 n 个等着的字节(从记录边界开始),返回:偷看到 m 个,其中最后一条完整记录的结尾 last
+// (一条都不完整时为 0),第一条不完整的记录还差 more 个字节到齐;bad = 读到的不是 TLS 记录头。
+func peekRecords(src net.Conn, n int64) (m, last, more int64, bad bool, err error) {
+	bp := spliceRecordPeek.Get().(*[]byte)
+	defer spliceRecordPeek.Put(bp)
+	p := *bp
+	if n < int64(len(p)) {
+		p = p[:n]
+	}
+	k, err := peekBytes(src, p)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	p = p[:k]
+	off := 0
+	for {
+		if len(p)-off < 5 {
+			return int64(k), int64(off), int64(5 - (len(p) - off)), false, nil
+		}
+		h := p[off:]
+		if h[1] != 3 || h[0] < 0x14 || h[0] > 0x17 {
+			return int64(k), int64(off), 0, true, nil
+		}
+		end := off + 5 + (int(h[3])<<8 | int(h[4]))
+		if end > len(p) {
+			return int64(k), int64(off), int64(end - len(p)), false, nil
+		}
+		off = end
 	}
 }
 
